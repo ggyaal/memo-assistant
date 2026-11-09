@@ -4,6 +4,7 @@ import type {
 	CreateMemosResponse,
 	ListMemosResponse,
 	MemoCategory,
+	UsageResponse,
 } from '../shared/types.ts';
 
 export class ApiRequestError extends Error {
@@ -52,4 +53,8 @@ export function fetchMemos(params: {
 	if (params.cursor) search.set('cursor', params.cursor);
 	if (params.category) search.set('category', params.category);
 	return request(`/api/memos?${search.toString()}`);
+}
+
+export function fetchUsage(): Promise<UsageResponse> {
+	return request('/api/usage');
 }

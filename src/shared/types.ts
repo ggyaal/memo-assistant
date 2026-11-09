@@ -51,6 +51,13 @@ export interface ListMemosResponse {
 	nextCursor: string | null;
 }
 
+export interface UsageResponse {
+	/** UTC day (resets 09:00 KST). `used` counts AI requests the server let through. */
+	today: { used: number; limit: number; resetsAt: string };
+	/** All-time AI requests since launch. */
+	total: number;
+}
+
 export type ApiErrorCode =
 	| 'invalid_request'
 	| 'forbidden_origin'

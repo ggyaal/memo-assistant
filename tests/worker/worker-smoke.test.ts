@@ -38,7 +38,7 @@ beforeAll(async () => {
 			bindings: {
 				MEMO_MODEL: 'cloudflare/@cf/zai-org/glm-4.7-flash',
 				RATE_LIMIT_PER_MINUTE: '5',
-				DAILY_AI_LIMIT: '200',
+				DAILY_AI_LIMIT: '150',
 			},
 			serviceBindings: {
 				AI: () => new Response('AI disabled in smoke test', { status: 503 }),
@@ -86,6 +86,14 @@ describe('built Worker (workerd + local D1 + Flue Durable Object)', () => {
 		expect(foreign.status).toBe(403);
 		const plain = await mf.dispatchFetch('http://localhost/api/memos', { method: 'POST', headers: { 'content-type': 'text/plain' }, body });
 		expect(plain.status).toBe(415);
+	});
+
+	it('serves usage numbers', async () => {
+		const res = await mf.dispatchFetch('http://localhost/api/usage');
+		expect(res.status).toBe(200);
+		const json = (await res.json()) as { today: { used: number; limit: number }; total: number };
+		expect(json.today).toMatchObject({ used: 0, limit: 150 });
+		expect(json.total).toBe(0);
 	});
 
 	it('rejects invalid input before the agent', async () => {

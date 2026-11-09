@@ -211,6 +211,59 @@ describe('POST /api/memos', () => {
 	});
 });
 
+describe('GET /api/usage', () => {
+	type Usage = { today: { used: number; limit: number; resetsAt: string }; total: number };
+	const usage = async (app: ReturnType<typeof makeApp>) => (await (await app.request('/api/usage')).json()) as Usage;
+
+	it('starts at zero with the configured limit and next 00:00 UTC reset', async () => {
+		const app = makeApp(toolRunner(db), { DAILY_AI_LIMIT: '150' });
+		const res = await app.request('/api/usage');
+		expect(res.status).toBe(200);
+		expect(res.headers.get('cache-control')).toBe('no-store');
+		expect(await res.json()).toEqual({
+			today: { used: 0, limit: 150, resetsAt: '2026-11-10T00:00:00.000Z' }, // = 09:00 KST
+			total: 0,
+		});
+	});
+
+	it('counts AI requests, but not duplicates or rejected input', async () => {
+		const app = makeApp(toolRunner(db), { RATE_LIMIT_PER_MINUTE: '100' });
+		const requestId = newRequestId();
+		await app.request('/api/memos', { method: 'POST', body: body(RAW, requestId) });
+		await app.request('/api/memos', { method: 'POST', body: body(RAW, requestId) }); // duplicate
+		await app.request('/api/memos', { method: 'POST', body: body('   ') }); // 400
+		await app.request('/api/memos', { method: 'POST', body: body() });
+		const u = await usage(app);
+		expect(u.today.used).toBe(2);
+		expect(u.total).toBe(2);
+	});
+
+	it('caps today at the limit and keeps denied requests out of the total', async () => {
+		const app = makeApp(toolRunner(db), { RATE_LIMIT_PER_MINUTE: '100', DAILY_AI_LIMIT: '2' });
+		const statuses: number[] = [];
+		for (let i = 0; i < 4; i++) statuses.push((await app.request('/api/memos', { method: 'POST', body: body() })).status);
+		expect(statuses).toEqual([201, 201, 429, 429]);
+		expect(await usage(app)).toMatchObject({ today: { used: 2, limit: 2 }, total: 2 });
+	});
+
+	it('also counts AI attempts that fail', async () => {
+		const app = makeApp(async () => {
+			throw new Error('model exploded');
+		});
+		expect((await app.request('/api/memos', { method: 'POST', body: body() })).status).toBe(502);
+		expect(await usage(app)).toMatchObject({ today: { used: 1 }, total: 1 });
+	});
+
+	it('resets today on the next UTC day while the all-time total survives cleanup', async () => {
+		const app = makeApp(toolRunner(db), { RATE_LIMIT_PER_MINUTE: '100' });
+		await app.request('/api/memos', { method: 'POST', body: body() });
+		clock = new Date('2026-11-10T00:30:00Z'); // 09:30 KST next day
+		expect(await usage(app)).toMatchObject({ today: { used: 0 }, total: 1 });
+		await app.request('/api/memos', { method: 'POST', body: body() }); // triggers expired-row cleanup
+		expect(await usage(app)).toMatchObject({ today: { used: 1, resetsAt: '2026-11-11T00:00:00.000Z' }, total: 2 });
+	});
+});
+
 describe('GET /api/memos', () => {
 	async function seed(app: ReturnType<typeof makeApp>, at: string, text = RAW, nickname = '테스터') {
 		clock = new Date(at);

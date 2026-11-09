@@ -2,6 +2,7 @@ import { type FormEvent, useState } from 'react';
 import { MemoCard } from './components/MemoCard.tsx';
 import { MemoInput } from './components/MemoInput.tsx';
 import { MemoList } from './components/MemoList.tsx';
+import { UsageMeter } from './components/UsageMeter.tsx';
 import { LIMITS, type CreateMemosResponse } from './shared/types.ts';
 
 const NICKNAME_KEY = 'memo-assistant:nickname';
@@ -19,6 +20,7 @@ export function App() {
 	const [draft, setDraft] = useState(nickname);
 	const [lastResult, setLastResult] = useState<CreateMemosResponse | null>(null);
 	const [refreshKey, setRefreshKey] = useState(0);
+	const [usageKey, setUsageKey] = useState(0);
 
 	function saveNickname(event: FormEvent) {
 		event.preventDefault();
@@ -45,6 +47,8 @@ export function App() {
 				알림 추천은 표시만 하며 실제 알림은 보내지 않습니다.
 			</aside>
 
+			<UsageMeter refreshKey={usageKey} />
+
 			{nickname ? (
 				<>
 					<p className="row space-between small">
@@ -61,6 +65,7 @@ export function App() {
 							setLastResult(result);
 							setRefreshKey((k) => k + 1);
 						}}
+						onSettled={() => setUsageKey((k) => k + 1)}
 					/>
 				</>
 			) : (

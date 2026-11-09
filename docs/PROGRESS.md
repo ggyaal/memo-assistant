@@ -2,7 +2,7 @@
 
 마지막 갱신: 2026-11-09 23:00 (KST)
 
-**배포 주소: https://memo-assistant.ggyaal.workers.dev** (Version `b9271abf-cce8-46d6-86a7-03373aecc3c2`, 2026-11-09)
+**배포 주소: https://memo-assistant.ggyaal.workers.dev** (현재 Version `bf18a7ca-e95f-4f3b-b408-5af2a3372625`, 2026-11-09)
 
 ## 1. 상태 요약
 | 단계 | 상태 | 근거 |
@@ -49,6 +49,7 @@
 | I4 | 결정 | 서버가 정하는 값은 `initialData`로 넘긴다. 요청마다 새 인스턴스(`req-<requestId>`)를 만든다. | — |
 | I5 | 결정 | 오늘/내일/모레/글피는 요청 시점 KST 날짜로 고정한다. 원문에 없는 `due_text`는 지운다. | — |
 | I6 | 결정 | `memos.position` 컬럼과 `usage_counters` 테이블을 추가했다(SPEC §5에 없음). | — |
+| I9 | 결정 | **화면 사용량 표시**(`GET /api/usage`, `UsageMeter`). "오늘 사용"은 서버가 AI로 넘긴 요청 수로, AI 실패 건도 포함하고 중복 requestId와 검증 실패 건은 제외한다. 기준은 UTC 하루(오전 9시 KST 초기화, Workers AI 무료량과 같은 기준)이며, 화면에는 한도를 넘지 않게 `min(count, limit)`로 표시한다. "누적 사용"은 만료되지 않는 `usage_counters`의 `total:ai` 행이다(`0002_usage_total.sql`). 누적 초깃값은 마이그레이션 시점의 sources 수라서, 그 이전에 실패한 시도는 빠진 **근사치**다. 횟수 기준이며 Neuron 양은 아니다. | 운영 반영 (2026-11-09, 버전 `bf18a7ca`) |
 | R1 | 조정 | 실측 결과 1건당 **35.9 Neurons**(프롬프트 1,492토큰, 출력 760토큰, `reasoning_effort: medium`)였다. 10,000/일이면 약 270건이다. 긴 입력과 검증 호출을 고려해 `DAILY_AI_LIMIT`를 200에서 **150**으로 낮췄다. | 해결 |
 | R2 | 위험 | 실패한 submission을 Flue가 'deferred'로 남긴다. 플랫폼 오류 뒤 재시도 때문에 Neuron이 추가로 쓰이는지는 배포 환경에서 관찰이 필요하다. 요청 경로는 90초에 시간 초과되며, 그때 `abort()`를 호출한다. | 열림 |
 | R3 | 위험 | `npm audit` 고위험 7건은 모두 `@flue/runtime`이 버전을 고정한 MCP SDK(`@modelcontextprotocol/*` 2.0.0)에서 나온다. 이 앱은 `useMcpConnection`을 쓰지 않아 해당 코드가 실행되지 않는다. `--force` 업그레이드는 하지 않았다. Flue를 업그레이드할 때 다시 확인한다. | 수용 |
@@ -99,14 +100,16 @@
 | 원격 D1 | sources 1, memos 3, 연결된 memos 3 (중복 없음) |
 | CPU (R5) | 위 R5 참조. 초과 오류 0건 |
 
+**사용량 표시 반영 (2026-11-09, 사용자 승인)**: 원격 `0002_usage_total.sql` 적용(`total:ai` 초깃값 1) → 재배포(Version `bf18a7ca-e95f-4f3b-b408-5af2a3372625`, 시작 시간 75ms) → 운영 `GET /api/usage` 응답 `{"today":{"used":1,"limit":150},"total":1}` 확인. 새 번들이 제공되는 것과 기존 보안 동작(403/415, CSP)이 그대로인 것도 확인했다. AI 호출은 하지 않았다.
+
 **공개 데이터 참고**: 검증용 메모 3건(닉네임 `배포검증`)이 공개 목록에 보인다. 원격 D1 데이터 삭제는 승인이 필요하므로 그대로 두었다.
 
 ## 7. 실행한 검증 (마지막 실행: 2026-11-09)
 | 명령 | 결과 |
 |---|---|
 | `npm run check:types` | 성공 |
-| `npm test` | 3개 파일, **50개 테스트** 통과 |
-| `npm run test:worker` | **5개 테스트** 통과 (빌드 Worker, workerd, CORS 없음, 403/415) |
+| `npm test` | 3개 파일, **55개 테스트** 통과 (사용량 5개 포함) |
+| `npm run test:worker` | **6개 테스트** 통과 (빌드 Worker, workerd, CORS 없음, 403/415, `/api/usage`) |
 | `npx wrangler deploy --dry-run` | 성공. 업로드 6.6MB / gzip 1.2MB, 바인딩 DO·D1·AI·vars |
 | `npm run dev` + 실제 AI | §4 |
 | `npx wrangler deploy` + 운영 확인 | §6 |

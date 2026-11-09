@@ -1,11 +1,11 @@
 import { Hono, type Context } from 'hono';
 import { secureHeaders } from 'hono/secure-headers';
 import * as v from 'valibot';
-import type { ApiError, ApiErrorCode, CreateMemosResponse, ListMemosResponse } from '../shared/types.ts';
+import type { ApiError, ApiErrorCode, CreateMemosResponse, ListMemosResponse, UsageResponse } from '../shared/types.ts';
 import { LIMITS } from '../shared/types.ts';
 import type { RunMemoAgent } from './agent-runner.ts';
 import { findSourceByRequestId, listMemos } from './db.ts';
-import { clientKey, consumeAiQuota } from './rate-limit.ts';
+import { clientKey, consumeAiQuota, readUsage } from './rate-limit.ts';
 import { kstDayRangeUtc } from './time.ts';
 import { CreateMemosRequestSchema, issuesToMessage, ListMemosQuerySchema } from './validation.ts';
 
@@ -83,6 +83,10 @@ function toPositiveInt(value: string | undefined, fallback: number): number {
 	return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function dailyLimit(env: ApiBindings): number {
+	return toPositiveInt(env.DAILY_AI_LIMIT, 150);
+}
+
 export function createApi(deps: ApiDeps) {
 	const now = deps.now ?? (() => new Date());
 	const newId = deps.newId ?? (() => crypto.randomUUID());
@@ -103,6 +107,16 @@ export function createApi(deps: ApiDeps) {
 	});
 
 	api.get('/health', (c) => c.json({ ok: true }));
+
+	api.get('/usage', async (c) => {
+		try {
+			const usage = await readUsage(c.env.DB, dailyLimit(c.env), now());
+			return c.json<UsageResponse>(usage);
+		} catch (error) {
+			console.error('read usage failed', describeError(error));
+			return fail(c, 500, 'db_error', '사용량을 불러오지 못했습니다.');
+		}
+	});
 
 	api.get('/memos', async (c) => {
 		const parsed = v.safeParse(ListMemosQuerySchema, c.req.query());
@@ -165,7 +179,7 @@ export function createApi(deps: ApiDeps) {
 				await clientKey(c.req.header('cf-connecting-ip')),
 				{
 					perMinute: toPositiveInt(c.env.RATE_LIMIT_PER_MINUTE, 5),
-					perDay: toPositiveInt(c.env.DAILY_AI_LIMIT, 150),
+					perDay: dailyLimit(c.env),
 				},
 				now(),
 			);

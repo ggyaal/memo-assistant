@@ -9,6 +9,15 @@ export type RateLimitDecision =
 	| { allowed: true }
 	| { allowed: false; reason: 'rate_limited' | 'daily_limit_reached'; retryAfterSeconds: number };
 
+const TOTAL_KEY = 'total:ai';
+const NEVER_EXPIRES = '9999-12-31T00:00:00.000Z';
+const DAY_MS = 86_400_000;
+
+function utcDay(now: Date): { key: string; end: Date } {
+	const day = now.toISOString().slice(0, 10);
+	return { key: `global:${day}`, end: new Date(Date.parse(`${day}T00:00:00Z`) + DAY_MS) };
+}
+
 async function bump(db: D1Database, key: string, expiresAt: string): Promise<number> {
 	const row = await db
 		.prepare(
@@ -56,9 +65,8 @@ export async function consumeAiQuota(
 		};
 	}
 
-	const day = nowIso.slice(0, 10);
-	const dayEnd = new Date(Date.parse(`${day}T00:00:00Z`) + 86_400_000);
-	const perDay = await bump(db, `global:${day}`, dayEnd.toISOString());
+	const { key: dayKey, end: dayEnd } = utcDay(now);
+	const perDay = await bump(db, dayKey, dayEnd.toISOString());
 	if (perDay > config.perDay) {
 		return {
 			allowed: false,
@@ -66,5 +74,31 @@ export async function consumeAiQuota(
 			retryAfterSeconds: Math.ceil((dayEnd.getTime() - now.getTime()) / 1000),
 		};
 	}
+	// All-time counter: only requests that actually go on to the AI.
+	await bump(db, TOTAL_KEY, NEVER_EXPIRES);
 	return { allowed: true };
+}
+
+export interface UsageSnapshot {
+	today: { used: number; limit: number; resetsAt: string };
+	total: number;
+}
+
+/**
+ * Public usage numbers for the page. "Today" is the UTC day (resets at
+ * 09:00 KST, like the Workers AI free allocation); the stored day counter can
+ * exceed the limit by denied attempts, so it is capped for display.
+ */
+export async function readUsage(db: D1Database, perDay: number, now: Date): Promise<UsageSnapshot> {
+	const { key: dayKey, end: dayEnd } = utcDay(now);
+	const { results } = await db
+		.prepare('SELECT counter_key, count, expires_at FROM usage_counters WHERE counter_key IN (?, ?)')
+		.bind(dayKey, TOTAL_KEY)
+		.all<{ counter_key: string; count: number; expires_at: string }>();
+	const day = results.find((r) => r.counter_key === dayKey && r.expires_at > now.toISOString());
+	const total = results.find((r) => r.counter_key === TOTAL_KEY);
+	return {
+		today: { used: Math.min(day?.count ?? 0, perDay), limit: perDay, resetsAt: dayEnd.toISOString() },
+		total: total?.count ?? 0,
+	};
 }

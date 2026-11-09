@@ -7,9 +7,12 @@ const EXAMPLE = '오늘 장 보고, 내일 오후 3시에 병원 예약해야 �
 export function MemoInput({
 	nickname,
 	onCreated,
+	onSettled,
 }: {
 	nickname: string;
 	onCreated: (result: CreateMemosResponse) => void;
+	/** Called after every attempt (success or error), e.g. to refresh usage numbers. */
+	onSettled?: () => void;
 }) {
 	const [text, setText] = useState('');
 	const [pending, setPending] = useState(false);
@@ -38,6 +41,7 @@ export function MemoInput({
 			setError({ message: apiError?.message ?? '알 수 없는 오류가 발생했습니다.', retryable });
 		} finally {
 			setPending(false);
+			onSettled?.();
 		}
 	}
 
