@@ -1,0 +1,22 @@
+node_modules/
+dist/
+
+# Secrets and local environment (never commit)
+.env
+.env.*
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+
+# Local Wrangler/Miniflare state, including the local D1 database
+.wrangler/
+
+# Flue-generated build inputs
+.flue-vite/
+.flue-vite.wrangler.jsonc
+
+.DS_Store
+*.log
+
+# Claude Code worktrees (local only)
+.claude/worktrees/

@@ -1,0 +1,25 @@
+{
+	// Worker / agent / test code: Cloudflare runtime types from `npm run cf-typegen`.
+	"compilerOptions": {
+		"target": "ES2022",
+		"module": "ESNext",
+		"moduleResolution": "Bundler",
+		"lib": ["ESNext"],
+		"types": ["node"],
+		"allowImportingTsExtensions": true,
+		"verbatimModuleSyntax": true,
+		"strict": true,
+		"skipLibCheck": true,
+		"noEmit": true
+	},
+	"include": [
+		"src/worker-configuration.d.ts",
+		"src/app.ts",
+		"src/cloudflare.ts",
+		"src/agents",
+		"src/tools",
+		"src/server",
+		"src/shared",
+		"tests"
+	]
+}

@@ -1,0 +1,38 @@
+{
+	"$schema": "./node_modules/wrangler/config-schema.json",
+	"name": "memo-assistant",
+	// Flue requires nodejs_compat and a compatibility_date of 2026-04-01 or later.
+	"compatibility_date": "2026-06-01",
+	"compatibility_flags": ["nodejs_compat"],
+	// Public demo is served only from <name>.<subdomain>.workers.dev.
+	// Per-version preview URLs are disabled to keep a single public surface.
+	"workers_dev": true,
+	"preview_urls": false,
+	// Workers AI binding used by Flue's keyless `cloudflare/...` models.
+	// NOTE: this binding reaches your Cloudflare account even in `vite dev`
+	// and consumes the daily free Neuron allocation.
+	"ai": { "binding": "AI" },
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "memo-assistant",
+			// Created with `npx wrangler d1 create memo-assistant` (APAC). Not a secret.
+			"database_id": "3b94baf6-5a20-4a9b-bb97-05b57fe981c1",
+			"migrations_dir": "migrations"
+		}
+	],
+	"vars": {
+		// Must be a free-plan Workers AI model that supports function calling.
+		"MEMO_MODEL": "cloudflare/@cf/zai-org/glm-4.7-flash",
+		"RATE_LIMIT_PER_MINUTE": "5",
+		"DAILY_AI_LIMIT": "150"
+	},
+	"assets": {
+		"not_found_handling": "single-page-application",
+		// Only /api/* reaches the Worker. The agent itself is never mounted publicly.
+		"run_worker_first": ["/api/*"]
+	},
+	// Every Flue agent generates a SQLite-backed Durable Object class
+	// (MemoOrganizer -> FlueMemoOrganizerAgent). Append-only history.
+	"migrations": [{ "tag": "v1", "new_sqlite_classes": ["FlueMemoOrganizerAgent"] }]
+}

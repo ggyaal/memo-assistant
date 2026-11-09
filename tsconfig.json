@@ -1,0 +1,17 @@
+{
+	"compilerOptions": {
+		"target": "ES2022",
+		"module": "ESNext",
+		"moduleResolution": "Bundler",
+		"lib": ["ESNext", "DOM", "DOM.Iterable"],
+		"types": ["node", "vite/client"],
+		"jsx": "react-jsx",
+		"allowImportingTsExtensions": true,
+		"verbatimModuleSyntax": true,
+		"strict": true,
+		"skipLibCheck": true,
+		"noEmit": true
+	},
+	"include": ["src", "vite.config.ts", "vitest.config.ts", "flue.config.ts"],
+	"exclude": ["src/server", "src/agents", "src/tools", "src/app.ts", "src/cloudflare.ts", "src/worker-configuration.d.ts"]
+}

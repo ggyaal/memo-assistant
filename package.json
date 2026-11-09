@@ -1,0 +1,49 @@
+{
+	"name": "memo-assistant",
+	"private": true,
+	"type": "module",
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"scripts": {
+		"dev": "vite dev",
+		"dev:offline": "MEMO_OFFLINE=1 vite dev",
+		"build": "vite build",
+		"preview": "vite preview",
+		"check:types": "tsc -p tsconfig.json && tsc -p tsconfig.worker.json",
+		"test": "vitest run",
+		"test:worker": "vite build && WORKER_SMOKE=1 vitest run tests/worker",
+		"db:migrate:local": "wrangler d1 migrations apply DB --local",
+		"cf-typegen": "wrangler types src/worker-configuration.d.ts"
+	},
+	"dependencies": {
+		"@flue/runtime": "2.3.0",
+		"hono": "^4.12.32",
+		"react": "^19.3.1",
+		"react-dom": "^19.3.1",
+		"valibot": "^1.1.0"
+	},
+	"devDependencies": {
+		"@cloudflare/vite-plugin": "^1.67.0",
+		"@flue/cli": "2.3.0",
+		"@flue/vite": "2.3.0",
+		"@types/node": "^22.10.10",
+		"@types/react": "^19.3.0",
+		"@types/react-dom": "^19.3.0",
+		"@vitejs/plugin-react": "^6.3.0",
+		"miniflare": "^5.20261104.0-beta",
+		"typescript": "^7.0.2",
+		"vite": "^8.0.14",
+		"vitest": "^5.1.0",
+		"wrangler": "^4.158.0"
+	},
+	"overrides": {
+		"@earendil-works/pi-ai": "1.4.0",
+		"@earendil-works/pi-agent-core": "1.4.0"
+	},
+	"allowScripts": {
+		"workerd@1.20261101.1": true,
+		"workerd@1.20261104.1": true,
+		"esbuild@0.28.2": true
+	}
+}
