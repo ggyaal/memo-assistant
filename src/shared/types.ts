@@ -3,6 +3,9 @@
 export const MEMO_CATEGORIES = ['todo', 'schedule', 'idea', 'note'] as const;
 export type MemoCategory = (typeof MEMO_CATEGORIES)[number];
 
+export const MEMO_PRIORITIES = ['high', 'medium', 'low'] as const;
+export type MemoPriority = (typeof MEMO_PRIORITIES)[number];
+
 export const LIMITS = {
 	nicknameMax: 20,
 	textMax: 1000,
@@ -11,6 +14,7 @@ export const LIMITS = {
 	contentMax: 300,
 	dueTextMax: 40,
 	reasonMax: 100,
+	agendaMax: 20,
 	listDefault: 20,
 	listMax: 50,
 	bodyBytesMax: 8 * 1024,
@@ -26,10 +30,15 @@ export interface Memo {
 	category: MemoCategory;
 	/** Exact schedule time (UTC ISO 8601), only when the input stated one. */
 	due_at: string | null;
+	/** KST calendar day (YYYY-MM-DD) when the input names a day, even without a time. */
+	due_date: string | null;
 	/** The deadline expression as written in the input. */
 	due_text: string | null;
 	reminder_recommended: boolean;
 	reminder_reason: string | null;
+	/** AI-assigned priority; null for memos saved before priorities existed. */
+	priority: MemoPriority | null;
+	priority_reason: string | null;
 	/** When the memo was saved (UTC ISO 8601). Not the schedule time. */
 	created_at: string;
 }
@@ -49,6 +58,13 @@ export interface CreateMemosResponse {
 export interface ListMemosResponse {
 	memos: Memo[];
 	nextCursor: string | null;
+}
+
+export interface AgendaResponse {
+	/** Upcoming memos with a recommended reminder, soonest first. */
+	reminders: Memo[];
+	/** Upcoming dated memos ranked by priority, then by how soon they are due. */
+	ranked: Memo[];
 }
 
 export interface UsageResponse {

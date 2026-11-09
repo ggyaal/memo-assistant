@@ -72,9 +72,9 @@ describe('MemoOrganizer agent (faux model, real Flue runtime + local D1)', () =>
 				fauxAssistantMessage(
 					fauxToolCall('save_memos', {
 						memos: [
-							{ title: '장보기', content: '오늘 장보기', category: 'todo', due_at: null, due_text: '오늘', reminder_recommended: true, reminder_reason: '오늘 해야 할 일로 언급됨' },
+							{ title: '장보기', content: '오늘 장보기', category: 'todo', due_at: null, due_text: '오늘', due_date: '2026-11-09', reminder_recommended: true, reminder_reason: '오늘 해야 할 일로 언급됨', priority: 'medium', priority_reason: '오늘 안에 하면 됨' },
 							// Model deliberately gets the date wrong (+1 day); the server pins "내일".
-							{ title: '병원 예약', content: '내일 오후 3시에 병원 예약하기', category: 'todo', due_at: '2026-11-11T15:00:00+09:00', due_text: '내일 오후 3시', reminder_recommended: true, reminder_reason: '명확한 수행 시각이 언급됨' },
+							{ title: '병원 예약', content: '내일 오후 3시에 병원 예약하기', category: 'todo', due_at: '2026-11-11T15:00:00+09:00', due_text: '내일 오후 3시', reminder_recommended: true, reminder_reason: '명확한 수행 시각이 언급됨', priority: 'high', priority_reason: '건강 관련 약속' },
 							// Model invents a date for an idea; the server drops it.
 							{ title: 'AI 검색 기능', content: 'AI 검색 기능 추가 아이디어', category: 'idea', due_at: '2026-12-01T09:00:00+09:00', due_text: '다음 달', reminder_recommended: false },
 						],
@@ -98,12 +98,18 @@ describe('MemoOrganizer agent (faux model, real Flue runtime + local D1)', () =>
 		expect(json.memos[1].due_at).toBe('2026-11-10T06:00:00.000Z'); // 내일 15:00 KST
 		expect(json.memos[2].due_at).toBeNull();
 		expect(json.memos[2].due_text).toBeNull();
+		expect(json.memos.map((m) => m.priority)).toEqual(['medium', 'high', null]);
+		expect(json.memos[0].due_date).toBe('2026-11-09'); // date-only "오늘"
+		expect(json.memos[1].due_date).toBe('2026-11-10'); // derived from due_at
+		expect(json.memos[2].due_date).toBeNull(); // invented "다음 달" dropped
 
 		// The model saw the original text and the KST date reference, not trusted ids.
 		const prompt = seenPrompts[0];
 		expect(prompt).toContain('병원 예약');
 		expect(prompt).toContain('내일 = 2026-11-10 (화)');
 		expect(prompt).toContain('save_memos');
+		expect(prompt).toContain('priority');
+		expect(prompt).toContain('due_date');
 		expect(prompt).not.toContain(json.source.id);
 	});
 

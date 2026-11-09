@@ -1,4 +1,5 @@
 import { type FormEvent, useState } from 'react';
+import { AgendaPanel } from './components/AgendaPanel.tsx';
 import { MemoCard } from './components/MemoCard.tsx';
 import { MemoInput } from './components/MemoInput.tsx';
 import { MemoList } from './components/MemoList.tsx';
@@ -35,7 +36,8 @@ export function App() {
 	}
 
 	return (
-		<main className="container">
+		<main className="container layout">
+			<div className="layout__top">
 			<header className="hero">
 				<h1>Memo Assistant</h1>
 				<p className="muted">여러 생각을 한 번에 적으면 AI가 할 일·일정·아이디어·메모로 나눠 정리합니다.</p>
@@ -99,12 +101,20 @@ export function App() {
 					</div>
 				</section>
 			)}
+			</div>
 
-			<MemoList refreshKey={refreshKey} />
+			{/* Side panel on wide screens; between the input and the list on mobile. */}
+			<aside className="layout__side" aria-label="다가오는 알림과 일정 우선순위">
+				<AgendaPanel refreshKey={refreshKey} />
+			</aside>
 
-			<footer className="muted small center footer">
-				AX School Build Your Agent · Flue + Cloudflare Workers AI + D1 프로토타입
-			</footer>
+			<div className="layout__bottom">
+				<MemoList refreshKey={refreshKey} />
+
+				<footer className="muted small center footer">
+					AX School Build Your Agent · Flue + Cloudflare Workers AI + D1 프로토타입
+				</footer>
+			</div>
 		</main>
 	);
 }

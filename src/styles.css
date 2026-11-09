@@ -191,8 +191,9 @@ button:disabled {
 }
 .memo-card__header {
 	display: flex;
+	flex-wrap: wrap;
 	align-items: center;
-	gap: 8px;
+	gap: 6px 8px;
 }
 .memo-card__title {
 	margin: 0;
@@ -326,4 +327,124 @@ button:disabled {
 	overflow: hidden;
 	clip: rect(0 0 0 0);
 	white-space: nowrap;
+}
+
+/* Layout: one column on mobile (top → side panel → list), side panel on wide screens. */
+.layout {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr);
+	grid-template-areas: 'top' 'side' 'bottom';
+	gap: 16px;
+}
+.layout__top,
+.layout__bottom {
+	display: flex;
+	flex-direction: column;
+	gap: 16px;
+	min-width: 0;
+}
+.layout__top {
+	grid-area: top;
+}
+.layout__side {
+	grid-area: side;
+	min-width: 0;
+}
+.layout__bottom {
+	grid-area: bottom;
+}
+@media (min-width: 960px) {
+	.container.layout {
+		max-width: 1040px;
+		grid-template-columns: minmax(0, 1fr) 340px;
+		grid-template-areas: 'top side' 'bottom side';
+		align-items: start;
+	}
+	.layout__side {
+		position: sticky;
+		top: 16px;
+		max-height: calc(100vh - 32px);
+		overflow-y: auto;
+	}
+}
+
+.agenda {
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+}
+.agenda__section {
+	gap: 8px;
+}
+.agenda__title {
+	font-size: 1rem;
+	margin: 0;
+}
+.agenda__list {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+.agenda__item {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	padding: 8px 0;
+	border-top: 1px solid var(--border);
+	overflow-wrap: anywhere;
+}
+.agenda__item:first-child {
+	border-top: none;
+	padding-top: 0;
+}
+.agenda__list--ranked .agenda__item {
+	flex-direction: row;
+	align-items: flex-start;
+	gap: 10px;
+}
+.agenda__body {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	min-width: 0;
+}
+.agenda__rank {
+	flex: none;
+	width: 26px;
+	height: 26px;
+	border-radius: 999px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	font-weight: 700;
+	font-size: 0.85rem;
+	background: var(--bg);
+	border: 1px solid var(--border);
+}
+.agenda__time {
+	font-size: 0.85rem;
+	font-weight: 600;
+	color: var(--schedule);
+}
+.agenda__name {
+	font-weight: 600;
+}
+.agenda__note {
+	margin: 0;
+}
+.badge--priority-high {
+	color: var(--error);
+}
+.badge--priority-medium {
+	color: var(--reminder);
+}
+.badge--priority-low {
+	color: var(--muted);
+}
+.badge--priority-unset {
+	color: var(--muted);
+	border-style: dashed;
 }

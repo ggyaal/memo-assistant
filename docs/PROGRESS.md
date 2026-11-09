@@ -2,7 +2,7 @@
 
 마지막 갱신: 2026-11-09 23:00 (KST)
 
-**배포 주소: https://memo-assistant.ggyaal.workers.dev** (현재 Version `bf18a7ca-e95f-4f3b-b408-5af2a3372625`, 2026-11-09)
+**배포 주소: https://memo-assistant.ggyaal.workers.dev** (현재 Version `4b94b6ef-12b0-4dbf-baf0-f7f255fb9ae4`, 2026-11-09)
 
 ## 1. 상태 요약
 | 단계 | 상태 | 근거 |
@@ -50,6 +50,9 @@
 | I5 | 결정 | 오늘/내일/모레/글피는 요청 시점 KST 날짜로 고정한다. 원문에 없는 `due_text`는 지운다. | — |
 | I6 | 결정 | `memos.position` 컬럼과 `usage_counters` 테이블을 추가했다(SPEC §5에 없음). | — |
 | I9 | 결정 | **화면 사용량 표시**(`GET /api/usage`, `UsageMeter`). "오늘 사용"은 서버가 AI로 넘긴 요청 수로, AI 실패 건도 포함하고 중복 requestId와 검증 실패 건은 제외한다. 기준은 UTC 하루(오전 9시 KST 초기화, Workers AI 무료량과 같은 기준)이며, 화면에는 한도를 넘지 않게 `min(count, limit)`로 표시한다. "누적 사용"은 만료되지 않는 `usage_counters`의 `total:ai` 행이다(`0002_usage_total.sql`). 누적 초깃값은 마이그레이션 시점의 sources 수라서, 그 이전에 실패한 시도는 빠진 **근사치**다. 횟수 기준이며 Neuron 양은 아니다. | 운영 반영 (2026-11-09, 버전 `bf18a7ca`) |
+| I10 | 결정 | **사이드 패널**(`GET /api/agenda`, `AgendaPanel`). 다가오는 항목만 보여 준다: `due_at`이 지나지 않았거나, 날짜만 있는 경우 `due_date`가 오늘(KST) 이후인 것. 알림 목록은 `reminder_recommended` 항목을 시간순으로, 순위 목록은 AI `priority`(high > medium(=미지정) > low) → 가까운 순 → 등록 순으로 정렬한다(`src/server/agenda.ts`). 각 20개까지. 실제 알림 발송은 없다. 모바일에서는 입력과 목록 사이에, 960px 이상에서는 오른쪽 sticky 사이드로 표시한다. | 운영 반영 (버전 `4b94b6ef`) |
+| I11 | 결정 | `0003_priority_due_date.sql`: `priority`, `priority_reason`, `due_date` 컬럼을 추가했다. `due_date`는 시각 없이 날짜만 있는 기한("오늘 장 보기")도 알림 목록에 넣기 위한 것이다. 기존 행은 `due_at`이 있을 때만 날짜를 채우고, 기존 메모의 priority는 비어 있다(미지정). 모델의 priority가 허용 값이 아니면 저장을 실패시키지 않고 미지정으로 둔다. | 구현 |
+| I12 | 수정됨 | **실제 모델이 "금요일까지"(요청일 11/9 월요일)를 11/20으로 계산했다.** 요일 표현도 서버가 계산한다(`pinnedDay`): "금요일"은 오늘을 포함한 가장 가까운 그 요일, "이번 주/다음 주/다다음 주 X요일"은 월요일 시작 주 기준이다. 시각이 있는 경우(`due_at`)에도 같은 날짜로 고정한다. 모델이 준 날짜는 "11월 20일" 같은 명시적 날짜에만 쓰고, 1년 이내 미래일 때만 받는다. 회귀 테스트를 추가했다. | 해결 |
 | R1 | 조정 | 실측 결과 1건당 **35.9 Neurons**(프롬프트 1,492토큰, 출력 760토큰, `reasoning_effort: medium`)였다. 10,000/일이면 약 270건이다. 긴 입력과 검증 호출을 고려해 `DAILY_AI_LIMIT`를 200에서 **150**으로 낮췄다. | 해결 |
 | R2 | 위험 | 실패한 submission을 Flue가 'deferred'로 남긴다. 플랫폼 오류 뒤 재시도 때문에 Neuron이 추가로 쓰이는지는 배포 환경에서 관찰이 필요하다. 요청 경로는 90초에 시간 초과되며, 그때 `abort()`를 호출한다. | 열림 |
 | R3 | 위험 | `npm audit` 고위험 7건은 모두 `@flue/runtime`이 버전을 고정한 MCP SDK(`@modelcontextprotocol/*` 2.0.0)에서 나온다. 이 앱은 `useMcpConnection`을 쓰지 않아 해당 코드가 실행되지 않는다. `--force` 업그레이드는 하지 않았다. Flue를 업그레이드할 때 다시 확인한다. | 수용 |
@@ -102,14 +105,16 @@
 
 **사용량 표시 반영 (2026-11-09, 사용자 승인)**: 원격 `0002_usage_total.sql` 적용(`total:ai` 초깃값 1) → 재배포(Version `bf18a7ca-e95f-4f3b-b408-5af2a3372625`, 시작 시간 75ms) → 운영 `GET /api/usage` 응답 `{"today":{"used":1,"limit":150},"total":1}` 확인. 새 번들이 제공되는 것과 기존 보안 동작(403/415, CSP)이 그대로인 것도 확인했다. AI 호출은 하지 않았다.
 
-**공개 데이터 참고**: 검증용 메모 3건(닉네임 `배포검증`)이 공개 목록에 보인다. 원격 D1 데이터 삭제는 승인이 필요하므로 그대로 두었다.
+**일정 패널 반영 (2026-11-09, 사용자 승인)**: 원격 `0003_priority_due_date.sql` 적용(기존 5건 중 시각이 있는 2건에 KST `due_date`를 채움, 예: `2026-11-10T21:00Z` → `2026-11-11`) → 재배포(Version `4b94b6ef-12b0-4dbf-baf0-f7f255fb9ae4`, 시작 시간 70ms) → 운영 실제 AI 1건(201, 16.7초): "금요일까지"가 `due_date=2026-11-13`(이번 주 금요일)으로 저장되어 서버 요일 계산이 운영에서 동작함을 확인했다. priority high 2건 저장. `/api/agenda`는 알림 4건을 시간순으로, 순위는 high 2건 → 미지정 2건으로 반환했다. 보안 동작(403/415/400, no-store, CSP)도 유지된다. **브라우저에서 화면 배치를 직접 확인하지는 않았다.**
+
+**공개 데이터 참고**: 검증용 메모 5건(닉네임 `배포검증`)이 공개 목록에 보인다. 원격 D1 데이터 삭제는 승인이 필요하므로 그대로 두었다.
 
 ## 7. 실행한 검증 (마지막 실행: 2026-11-09)
 | 명령 | 결과 |
 |---|---|
 | `npm run check:types` | 성공 |
-| `npm test` | 3개 파일, **55개 테스트** 통과 (사용량 5개 포함) |
-| `npm run test:worker` | **6개 테스트** 통과 (빌드 Worker, workerd, CORS 없음, 403/415, `/api/usage`) |
+| `npm test` | 4개 파일, **89개 테스트** 통과 (사용량, 일정 순위, 요일 계산 포함) |
+| `npm run test:worker` | **7개 테스트** 통과 (빌드 Worker, workerd, CORS 없음, 403/415, `/api/usage`, `/api/agenda`) |
 | `npx wrangler deploy --dry-run` | 성공. 업로드 6.6MB / gzip 1.2MB, 바인딩 DO·D1·AI·vars |
 | `npm run dev` + 실제 AI | §4 |
 | `npx wrangler deploy` + 운영 확인 | §6 |

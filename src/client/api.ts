@@ -1,4 +1,5 @@
 import type {
+	AgendaResponse,
 	ApiError,
 	CreateMemosRequest,
 	CreateMemosResponse,
@@ -57,4 +58,8 @@ export function fetchMemos(params: {
 
 export function fetchUsage(): Promise<UsageResponse> {
 	return request('/api/usage');
+}
+
+export function fetchAgenda(): Promise<AgendaResponse> {
+	return request('/api/agenda');
 }

@@ -1,4 +1,4 @@
-import type { Memo, MemoCategory } from '../shared/types.ts';
+import type { Memo, MemoCategory, MemoPriority } from '../shared/types.ts';
 import type { SanitizedMemo } from './validation.ts';
 
 export interface SourceRecord {
@@ -18,16 +18,20 @@ interface MemoRow {
 	content: string;
 	category: MemoCategory;
 	due_at: string | null;
+	due_date: string | null;
 	due_text: string | null;
 	reminder_recommended: number;
 	reminder_reason: string | null;
+	priority: MemoPriority | null;
+	priority_reason: string | null;
 	position: number;
 	created_at: string;
 }
 
 const MEMO_SELECT = `
 	SELECT m.id, m.source_id, s.nickname, s.raw_text, m.title, m.content, m.category,
-	       m.due_at, m.due_text, m.reminder_recommended, m.reminder_reason, m.position, m.created_at
+	       m.due_at, m.due_date, m.due_text, m.reminder_recommended, m.reminder_reason,
+	       m.priority, m.priority_reason, m.position, m.created_at
 	FROM memos m JOIN sources s ON s.id = m.source_id`;
 
 function toMemo(row: MemoRow): Memo {
@@ -40,9 +44,12 @@ function toMemo(row: MemoRow): Memo {
 		content: row.content,
 		category: row.category,
 		due_at: row.due_at,
+		due_date: row.due_date,
 		due_text: row.due_text,
 		reminder_recommended: row.reminder_recommended === 1,
 		reminder_reason: row.reminder_reason,
+		priority: row.priority,
+		priority_reason: row.priority_reason,
 		created_at: row.created_at,
 	};
 }
@@ -84,9 +91,9 @@ export async function saveSourceWithMemos(
 		...memos.map((memo, index) =>
 			db
 				.prepare(
-					`INSERT INTO memos (id, source_id, title, content, category, due_at, due_text,
-					   reminder_recommended, reminder_reason, position, created_at)
-					 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+					`INSERT INTO memos (id, source_id, title, content, category, due_at, due_date, due_text,
+					   reminder_recommended, reminder_reason, priority, priority_reason, position, created_at)
+					 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 				)
 				.bind(
 					memoIds[index],
@@ -95,9 +102,12 @@ export async function saveSourceWithMemos(
 					memo.content,
 					memo.category,
 					memo.due_at,
+					memo.due_date,
 					memo.due_text,
 					memo.reminder_recommended ? 1 : 0,
 					memo.reminder_reason,
+					memo.priority,
+					memo.priority_reason,
 					index,
 					source.created_at,
 				),
@@ -180,4 +190,22 @@ export async function listMemos(
 		memos: page.map(toMemo),
 		nextCursor: results.length > options.limit && last ? encodeCursor(last) : null,
 	};
+}
+
+/**
+ * Upcoming dated memos: an exact time still ahead, or a date-only deadline on
+ * or after today's KST date. Bounded so the in-memory ranking stays cheap.
+ */
+export async function listUpcoming(db: D1Database, now: Date, todayKst: string, max = 200): Promise<Memo[]> {
+	const { results } = await db
+		.prepare(
+			`${MEMO_SELECT}
+			 WHERE (m.due_at IS NOT NULL AND m.due_at > ?)
+			    OR (m.due_at IS NULL AND m.due_date IS NOT NULL AND m.due_date >= ?)
+			 ORDER BY COALESCE(m.due_at, m.due_date) ASC
+			 LIMIT ?`,
+		)
+		.bind(now.toISOString(), todayKst, max)
+		.all<MemoRow>();
+	return results.map(toMemo);
 }

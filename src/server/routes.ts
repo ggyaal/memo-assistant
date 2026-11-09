@@ -1,12 +1,20 @@
 import { Hono, type Context } from 'hono';
 import { secureHeaders } from 'hono/secure-headers';
 import * as v from 'valibot';
-import type { ApiError, ApiErrorCode, CreateMemosResponse, ListMemosResponse, UsageResponse } from '../shared/types.ts';
+import type {
+	AgendaResponse,
+	ApiError,
+	ApiErrorCode,
+	CreateMemosResponse,
+	ListMemosResponse,
+	UsageResponse,
+} from '../shared/types.ts';
 import { LIMITS } from '../shared/types.ts';
 import type { RunMemoAgent } from './agent-runner.ts';
-import { findSourceByRequestId, listMemos } from './db.ts';
+import { buildAgenda } from './agenda.ts';
+import { findSourceByRequestId, listMemos, listUpcoming } from './db.ts';
 import { clientKey, consumeAiQuota, readUsage } from './rate-limit.ts';
-import { kstDayRangeUtc } from './time.ts';
+import { kstDate, kstDayRangeUtc } from './time.ts';
 import { CreateMemosRequestSchema, issuesToMessage, ListMemosQuerySchema } from './validation.ts';
 
 export interface ApiBindings {
@@ -115,6 +123,17 @@ export function createApi(deps: ApiDeps) {
 		} catch (error) {
 			console.error('read usage failed', describeError(error));
 			return fail(c, 500, 'db_error', '사용량을 불러오지 못했습니다.');
+		}
+	});
+
+	api.get('/agenda', async (c) => {
+		try {
+			const current = now();
+			const upcoming = await listUpcoming(c.env.DB, current, kstDate(current));
+			return c.json<AgendaResponse>(buildAgenda(upcoming, LIMITS.agendaMax));
+		} catch (error) {
+			console.error('agenda failed', describeError(error));
+			return fail(c, 500, 'db_error', '다가오는 일정을 불러오지 못했습니다.');
 		}
 	});
 

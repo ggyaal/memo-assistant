@@ -56,7 +56,7 @@ AX School **Build Your Agent** 과제용으로, 여러 사람이 공개 체험�
 ### 구조 규칙
 - 에이전트는 **dispatch 전용**이다. `createAgentRouter()`로 공개 마운트하지 않는다(검증·요청 제한을 우회해 대화를 읽고 쓸 수 있게 됨). 진입점은 `POST /api/memos` → `src/server/agent-runner.ts`의 `init().dispatch()/read()` 하나뿐이다.
 - 서버가 정하는 값(nickname, requestId, sourceId, createdAt, 원문)은 에이전트 `initialData`로 넘기고 Tool이 클로저로 사용한다. Tool 입력 스키마에 넣지 않는다.
-- 모델 출력은 `src/server/validation.ts`의 `sanitizeMemo()`를 거친 뒤에만 저장한다(원문에 없는 기한 제거, 시각 표현이 없으면 `due_at` 제거, 오늘/내일/모레를 요청 시점의 KST 날짜로 고정). 실제 모델은 지시를 어기고 "오늘"에 00:00을 넣은 적이 있으므로 프롬프트만으로 막으려 하지 않는다.
+- 모델 출력은 `src/server/validation.ts`의 `sanitizeMemo()`를 거친 뒤에만 저장한다(원문에 없는 기한 제거, 시각 표현이 없으면 `due_at` 제거, 오늘/내일/모레와 요일 표현을 요청 시점의 KST 날짜로 서버가 계산(`pinnedDay`)). 실제 모델은 지시를 어기고 "오늘"에 00:00을 넣거나 "금요일"을 한 주 뒤로 계산한 적이 있으므로 프롬프트만으로 막으려 하지 않는다.
 - `POST /api/memos`의 JSON Content-Type 강제와 Origin 검사는 크로스사이트 할당량 소모 방지책이다. 제거하거나 CORS를 열지 않는다.
 - 에이전트 이름을 바꾸면 Durable Object 클래스명이 바뀐다. `wrangler.jsonc` migrations에 새 태그를 추가하고(`renamed_classes` 등) 기존 항목은 수정하지 않는다. `wrangler.jsonc`를 수정했다면 `npm run cf-typegen`을 다시 실행한다.
 

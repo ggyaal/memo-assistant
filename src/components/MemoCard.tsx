@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { CATEGORY_LABELS, formatKst } from '../client/format.ts';
+import { CATEGORY_LABELS, formatDue, formatKst, PRIORITY_LABELS } from '../client/format.ts';
 import type { Memo } from '../shared/types.ts';
 
 // All model-produced strings are rendered as plain text nodes (never as HTML).
@@ -9,13 +9,18 @@ export function MemoCard({ memo, showSource = true }: { memo: Memo; showSource?:
 		<article className={`memo-card memo-card--${memo.category}`}>
 			<header className="memo-card__header">
 				<span className={`badge badge--${memo.category}`}>{CATEGORY_LABELS[memo.category]}</span>
+				{memo.priority && (
+					<span className={`badge badge--priority-${memo.priority}`} title={memo.priority_reason ?? undefined}>
+						중요도 {PRIORITY_LABELS[memo.priority]}
+					</span>
+				)}
 				<h3 className="memo-card__title">{memo.title}</h3>
 			</header>
 			<p className="memo-card__content">{memo.content}</p>
-			{(memo.due_at || memo.due_text) && (
+			{(memo.due_at || memo.due_date || memo.due_text) && (
 				<p className="memo-card__due">
 					<span aria-hidden="true">📅 </span>
-					{memo.due_at ? formatKst(memo.due_at) : '정확한 일시 없음'}
+					{formatDue(memo) ?? '정확한 일시 없음'}
 					{memo.due_text && <span className="muted"> · 원문: “{memo.due_text}”</span>}
 				</p>
 			)}

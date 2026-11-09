@@ -10,9 +10,9 @@ const RAW = '오늘 장 보고, 내일 오후 3시에 병원 예약해야 해. A
 
 /** The three memos SPEC §4 expects for the sample input. */
 const SAMPLE_MEMOS = [
-	{ title: '장보기', content: '오늘 장보기', category: 'todo', due_at: null, due_text: '오늘', reminder_recommended: true, reminder_reason: '오늘 해야 할 일로 언급됨' },
-	{ title: '병원 예약', content: '내일 오후 3시에 병원 예약하기', category: 'todo', due_at: '2026-11-10T15:00:00+09:00', due_text: '내일 오후 3시', reminder_recommended: true, reminder_reason: '명확한 수행 시각이 언급됨' },
-	{ title: 'AI 검색 기능', content: 'AI 검색 기능 추가 아이디어', category: 'idea', due_at: null, due_text: null, reminder_recommended: false, reminder_reason: null },
+	{ title: '장보기', content: '오늘 장보기', category: 'todo', due_at: null, due_text: '오늘', reminder_recommended: true, reminder_reason: '오늘 해야 할 일로 언급됨', priority: 'medium', priority_reason: '오늘 안에 하면 됨' },
+	{ title: '병원 예약', content: '내일 오후 3시에 병원 예약하기', category: 'todo', due_at: '2026-11-10T15:00:00+09:00', due_text: '내일 오후 3시', reminder_recommended: true, reminder_reason: '명확한 수행 시각이 언급됨', priority: 'high', priority_reason: '건강 관련 약속' },
+	{ title: 'AI 검색 기능', content: 'AI 검색 기능 추가 아이디어', category: 'idea', due_at: null, due_text: null, reminder_recommended: false, reminder_reason: null, priority: 'low', priority_reason: '기한 없는 아이디어' },
 ] as const;
 
 /** Runs the real save_memos tool, standing in for the model's tool call. */
@@ -208,6 +208,41 @@ describe('POST /api/memos', () => {
 		const res = await app.request('/api/memos', { method: 'POST', body: body(), headers: { 'content-type': 'application/json' } }, { DB: broken });
 		expect(res.status).toBe(500);
 		expect(((await res.json()) as { error: string }).error).toBe('db_error');
+	});
+});
+
+describe('GET /api/agenda', () => {
+	type Agenda = { reminders: { title: string; due_at: string | null; due_date: string | null }[]; ranked: { title: string; priority: string | null }[] };
+	const agenda = async (app: ReturnType<typeof makeApp>) => (await (await app.request('/api/agenda')).json()) as Agenda;
+
+	it('lists upcoming reminders by time and ranks dated memos by priority', async () => {
+		const app = makeApp(toolRunner(db));
+		expect((await app.request('/api/memos', { method: 'POST', body: body() })).status).toBe(201);
+		const a = await agenda(app);
+		// 장보기: date-only "오늘" (2026-11-09 KST) → before tomorrow 15:00.
+		expect(a.reminders.map((m) => m.title)).toEqual(['장보기', '병원 예약']);
+		expect(a.reminders[0]).toMatchObject({ due_at: null, due_date: '2026-11-09' });
+		// The idea has no date, so it is not on the agenda.
+		expect(a.ranked.map((m) => [m.title, m.priority])).toEqual([
+			['병원 예약', 'high'],
+			['장보기', 'medium'],
+		]);
+	});
+
+	it('drops items once their time or day has passed', async () => {
+		const app = makeApp(toolRunner(db));
+		await app.request('/api/memos', { method: 'POST', body: body() });
+		clock = new Date('2026-11-10T05:00:00Z'); // 11-10 14:00 KST: 장보기(11-09) is past, 병원(15:00) is not
+		expect((await agenda(app)).reminders.map((m) => m.title)).toEqual(['병원 예약']);
+		clock = new Date('2026-11-10T07:00:00Z'); // 16:00 KST: both past
+		expect(await agenda(app)).toEqual({ reminders: [], ranked: [] });
+	});
+
+	it('returns empty lists with no-store caching', async () => {
+		const res = await makeApp(toolRunner(db)).request('/api/agenda');
+		expect(res.status).toBe(200);
+		expect(res.headers.get('cache-control')).toBe('no-store');
+		expect(await res.json()).toEqual({ reminders: [], ranked: [] });
 	});
 });
 

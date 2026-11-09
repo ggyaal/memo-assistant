@@ -88,6 +88,12 @@ describe('built Worker (workerd + local D1 + Flue Durable Object)', () => {
 		expect(plain.status).toBe(415);
 	});
 
+	it('serves the agenda', async () => {
+		const res = await mf.dispatchFetch('http://localhost/api/agenda');
+		expect(res.status).toBe(200);
+		expect(await res.json()).toEqual({ reminders: [], ranked: [] });
+	});
+
 	it('serves usage numbers', async () => {
 		const res = await mf.dispatchFetch('http://localhost/api/usage');
 		expect(res.status).toBe(200);

@@ -7,7 +7,9 @@ import {
 	kstDateTimeLabel,
 	kstDayRangeUtc,
 	normalizeDueAt,
+	pinnedDay,
 	reconcileRelativeDate,
+	resolveDueDate,
 } from '../src/server/time.ts';
 import { CreateMemosRequestSchema, sanitizeMemo, SaveMemosInputSchema } from '../src/server/validation.ts';
 
@@ -169,5 +171,66 @@ describe('sanitizeMemo (anti-fabrication guard)', () => {
 		);
 		expect(memo.title).not.toContain('\u0000');
 		expect(memo.title.length).toBe(60);
+	});
+});
+
+describe('resolveDueDate (date-only deadlines)', () => {
+	it.each([
+		['exact time wins', '내일 오후 3시', '2026-11-10T06:00:00.000Z', '2026-12-25', '2026-11-10'],
+		['relative word pinned to request date', '오늘', null, '2026-11-20', '2026-11-09'],
+		['model date for a named day', '11월 20일', null, '2026-11-20', '2026-11-20'],
+		['weekday from the reference table', '금요일까지', null, '2026-11-13', '2026-11-13'],
+		['weekday the model miscounted (observed with glm-4.7-flash)', '금요일', null, '2026-11-20', '2026-11-13'],
+		['weekday with no model date', '다음 주 금요일', null, null, '2026-11-20'],
+		['vague range → none', '다음 주', null, '2026-11-16', null],
+		['no deadline text → none', null, null, '2026-11-20', null],
+		['past date rejected', '11월 1일', null, '2026-11-01', null],
+		['malformed date rejected', '11월 20일', null, '11/20', null],
+		['duration is not a day', '3일 동안', null, '2026-11-12', null],
+	])('%s', (_label, text, dueAt, modelDate, expected) => {
+		expect(resolveDueDate(text, dueAt, modelDate, NOW)).toBe(expected);
+	});
+});
+
+describe('sanitizeMemo priority', () => {
+	const base = { title: 't', content: 'c', category: 'todo' as const, reminder_recommended: false };
+
+	it('keeps a valid priority with its reason', () => {
+		const memo = sanitizeMemo({ ...base, priority: 'HIGH', priority_reason: '내일 병원 예약' }, RAW, NOW);
+		expect(memo).toMatchObject({ priority: 'high', priority_reason: '내일 병원 예약' });
+	});
+
+	it('drops an unknown priority (and its reason) instead of failing', () => {
+		const memo = sanitizeMemo({ ...base, priority: 'urgent', priority_reason: 'x' }, RAW, NOW);
+		expect(memo).toMatchObject({ priority: null, priority_reason: null });
+	});
+
+	it('stores the KST date for a date-only deadline', () => {
+		const memo = sanitizeMemo({ ...base, due_text: '오늘', due_at: null, due_date: '2026-11-30' }, RAW, NOW);
+		expect(memo).toMatchObject({ due_at: null, due_date: '2026-11-09' });
+	});
+});
+
+describe('pinnedDay (server-computed day; request on Monday 2026-11-09 KST)', () => {
+	it.each([
+		['오늘', '2026-11-09'],
+		['모레까지', '2026-11-11'],
+		['금요일', '2026-11-13'],
+		['월요일', '2026-11-09'], // today counts
+		['일요일 저녁', '2026-11-15'],
+		['이번 주 수요일', '2026-11-11'],
+		['다음 주 금요일', '2026-11-20'],
+		['담주 화요일', '2026-11-17'],
+		['다다음 주 월요일', '2026-11-23'],
+		['오늘이나 금요일', null], // ambiguous
+		['다음 주', null],
+		['11월 20일', null], // explicit dates are left to the model + range check
+	])('%s → %s', (text, expected) => {
+		expect(pinnedDay(text, NOW)).toBe(expected);
+	});
+
+	it('pins a timed weekday deadline too', () => {
+		// Model said next-next Friday 14:00; the server keeps 14:00 on this Friday.
+		expect(reconcileRelativeDate('2026-11-20T05:00:00.000Z', '금요일 오후 2시', NOW)).toBe('2026-11-13T05:00:00.000Z');
 	});
 });

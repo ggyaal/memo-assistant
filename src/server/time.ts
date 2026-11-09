@@ -87,9 +87,69 @@ export function normalizeDueAt(value: string | null | undefined): string | null 
  * Protects against the model mis-computing the calendar date.
  */
 export function reconcileRelativeDate(dueAtUtc: string, dueText: string, now: Date): string {
-	const hits = RELATIVE_DAY_WORDS.filter(({ word }) => dueText.includes(word));
-	if (hits.length !== 1) return dueAtUtc;
-	const expectedDate = addDays(kstDate(now), hits[0].offset);
+	const expectedDate = pinnedDay(dueText, now);
+	if (!expectedDate) return dueAtUtc;
 	const kstTime = new Date(Date.parse(dueAtUtc) + KST_OFFSET_MS).toISOString().slice(11, 19);
 	return new Date(Date.parse(`${expectedDate}T${kstTime}+09:00`)).toISOString();
+}
+
+const WEEKDAY_INDEX: Record<string, number> = { 월: 0, 화: 1, 수: 2, 목: 3, 금: 4, 토: 5, 일: 6 }; // Monday-first
+const WEEKDAY_PATTERN = /(다다음\s*주|다음\s*주|담주|이번\s*주|금주)?\s*([월화수목금토일])요일/g;
+
+/**
+ * The KST day a deadline text pins down by itself, without trusting the model:
+ * - one relative day word: 오늘/내일/모레/글피;
+ * - one weekday: "금요일" = the nearest one from today (today included),
+ *   "이번 주/다음 주/다다음 주 금요일" = that weekday of the Monday-first week.
+ * Returns null when the text has none of these or is ambiguous (several hits).
+ */
+export function pinnedDay(dueText: string, now: Date): string | null {
+	const today = kstDate(now);
+	const relative = RELATIVE_DAY_WORDS.filter(({ word }) => dueText.includes(word));
+	const weekdays = [...dueText.matchAll(WEEKDAY_PATTERN)];
+	if (relative.length + weekdays.length !== 1) return null;
+	if (relative.length === 1) return addDays(today, relative[0].offset);
+
+	const [, week, day] = weekdays[0];
+	const target = WEEKDAY_INDEX[day];
+	const todayIndex = (new Date(`${today}T00:00:00Z`).getUTCDay() + 6) % 7;
+	if (!week) return addDays(today, (target - todayIndex + 7) % 7);
+	const monday = addDays(today, -todayIndex);
+	const weeksAhead = /다다음/.test(week) ? 2 : /다음|담/.test(week) ? 1 : 0;
+	return addDays(monday, weeksAhead * 7 + target);
+}
+
+// A named calendar day: "11월 20일", "20일", "11/20", "금요일". Vague ranges
+// ("다음 주", "이번 달", "언젠가") are not a day.
+const EXPLICIT_DATE_PATTERN = /\d{1,2}\s*월\s*\d{1,2}\s*일|\d{1,2}\s*일(?!\s*(?:간|동안))|\d{1,2}\/\d{1,2}/;
+const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+/** Calendar date (YYYY-MM-DD) in KST of a UTC instant. */
+export function kstDateOf(isoUtc: string): string {
+	return kstDate(new Date(isoUtc));
+}
+
+/**
+ * The KST calendar day a memo is due, or null when the input names no
+ * specific day. Order of trust: an exact time (already pinned) → a day the
+ * text pins by itself (pinnedDay) → the model's date, only for an explicit
+ * calendar date within the next year.
+ */
+export function resolveDueDate(
+	dueText: string | null,
+	dueAtUtc: string | null,
+	modelDate: string | null | undefined,
+	now: Date,
+): string | null {
+	if (dueAtUtc) return kstDateOf(dueAtUtc);
+	if (!dueText) return null;
+	const pinned = pinnedDay(dueText, now);
+	if (pinned) return pinned;
+	// Weekdays/relative words are fully handled above; the model's date is only
+	// trusted for an explicit calendar date ("11월 20일", "20일", "11/20").
+	if (!EXPLICIT_DATE_PATTERN.test(dueText) || /요일/.test(dueText)) return null;
+	const date = modelDate?.trim() ?? '';
+	if (!ISO_DATE_PATTERN.test(date) || Number.isNaN(Date.parse(`${date}T00:00:00Z`))) return null;
+	const today = kstDate(now);
+	return date >= today && date <= addDays(today, 366) ? date : null;
 }

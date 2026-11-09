@@ -1,6 +1,6 @@
 import * as v from 'valibot';
-import { LIMITS, MEMO_CATEGORIES, type MemoCategory } from '../shared/types.ts';
-import { hasExplicitTime, normalizeDueAt, reconcileRelativeDate } from './time.ts';
+import { LIMITS, MEMO_CATEGORIES, MEMO_PRIORITIES, type MemoCategory, type MemoPriority } from '../shared/types.ts';
+import { hasExplicitTime, normalizeDueAt, reconcileRelativeDate, resolveDueDate } from './time.ts';
 
 // Strip ASCII control characters except tab/newline.
 // eslint-disable-next-line no-control-regex
@@ -56,9 +56,14 @@ export const ModelMemoSchema = v.object({
 	content: v.pipe(v.string(), v.minLength(1)),
 	category: v.picklist(MEMO_CATEGORIES),
 	due_at: v.nullish(v.string()),
+	due_date: v.nullish(v.string()),
 	due_text: v.nullish(v.string()),
 	reminder_recommended: v.optional(v.boolean(), false),
 	reminder_reason: v.nullish(v.string()),
+	// A string (not a picklist) so an unexpected value degrades to "no priority"
+	// in sanitizeMemo instead of failing the whole save and forcing a model retry.
+	priority: v.nullish(v.pipe(v.string(), v.description('One of: high, medium, low'))),
+	priority_reason: v.nullish(v.string()),
 });
 
 export const SaveMemosInputSchema = v.object({
@@ -72,9 +77,17 @@ export interface SanitizedMemo {
 	content: string;
 	category: MemoCategory;
 	due_at: string | null;
+	due_date: string | null;
 	due_text: string | null;
 	reminder_recommended: boolean;
 	reminder_reason: string | null;
+	priority: MemoPriority | null;
+	priority_reason: string | null;
+}
+
+function toPriority(value: string | null | undefined): MemoPriority | null {
+	const normalized = value?.trim().toLowerCase();
+	return (MEMO_PRIORITIES as readonly string[]).includes(normalized ?? '') ? (normalized as MemoPriority) : null;
 }
 
 function clip(value: string, max: number): string {
@@ -91,7 +104,8 @@ function squash(value: string): string {
  * - a deadline expression must literally appear in the original input,
  * - no deadline expression means no schedule time,
  * - relative day words (오늘/내일/...) are pinned to the request's KST date,
- * - no reminder means no reminder reason.
+ * - a due date is kept only when the text names a day (see resolveDueDate),
+ * - no reminder means no reminder reason; no priority means no priority reason.
  */
 export function sanitizeMemo(memo: ModelMemo, rawText: string, now: Date): SanitizedMemo {
 	let dueText = memo.due_text ? clip(memo.due_text, LIMITS.dueTextMax) : null;
@@ -102,7 +116,12 @@ export function sanitizeMemo(memo: ModelMemo, rawText: string, now: Date): Sanit
 	let dueAt = dueText && hasExplicitTime(dueText) ? normalizeDueAt(memo.due_at) : null;
 	if (dueAt && dueText) dueAt = reconcileRelativeDate(dueAt, dueText, now);
 
+	const dueDate = resolveDueDate(dueText, dueAt, memo.due_date, now);
+
 	const reminder = memo.reminder_recommended === true;
+	const priority = toPriority(memo.priority);
+	const priorityReason =
+		priority && memo.priority_reason ? clip(memo.priority_reason, LIMITS.reasonMax) || null : null;
 	const reason = reminder && memo.reminder_reason ? clip(memo.reminder_reason, LIMITS.reasonMax) || null : null;
 
 	return {
@@ -110,9 +129,12 @@ export function sanitizeMemo(memo: ModelMemo, rawText: string, now: Date): Sanit
 		content: clip(memo.content, LIMITS.contentMax) || clip(memo.title, LIMITS.contentMax),
 		category: memo.category,
 		due_at: dueAt,
+		due_date: dueDate,
 		due_text: dueText,
 		reminder_recommended: reminder,
 		reminder_reason: reason,
+		priority,
+		priority_reason: priorityReason,
 	};
 }
 
