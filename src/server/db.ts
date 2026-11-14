@@ -24,6 +24,8 @@ interface MemoRow {
 	reminder_reason: string | null;
 	priority: MemoPriority | null;
 	priority_reason: string | null;
+	manual_rank: number | null;
+	completed_at: string | null;
 	position: number;
 	created_at: string;
 }
@@ -31,7 +33,7 @@ interface MemoRow {
 const MEMO_SELECT = `
 	SELECT m.id, m.source_id, s.nickname, s.raw_text, m.title, m.content, m.category,
 	       m.due_at, m.due_date, m.due_text, m.reminder_recommended, m.reminder_reason,
-	       m.priority, m.priority_reason, m.position, m.created_at
+	       m.priority, m.priority_reason, m.manual_rank, m.completed_at, m.position, m.created_at
 	FROM memos m JOIN sources s ON s.id = m.source_id`;
 
 function toMemo(row: MemoRow): Memo {
@@ -50,6 +52,8 @@ function toMemo(row: MemoRow): Memo {
 		reminder_reason: row.reminder_reason,
 		priority: row.priority,
 		priority_reason: row.priority_reason,
+		manual_rank: row.manual_rank,
+		completed_at: row.completed_at,
 		created_at: row.created_at,
 	};
 }
@@ -64,7 +68,7 @@ export async function findSourceByRequestId(
 		.first<SourceRecord>();
 	if (!source) return null;
 	const { results } = await db
-		.prepare(`${MEMO_SELECT} WHERE m.source_id = ? ORDER BY m.position ASC`)
+		.prepare(`${MEMO_SELECT} WHERE m.source_id = ? AND m.deleted_at IS NULL ORDER BY m.position ASC`)
 		.bind(source.id)
 		.all<MemoRow>();
 	return { source, memos: results.map(toMemo) };
@@ -155,7 +159,7 @@ export async function listMemos(
 	db: D1Database,
 	options: ListOptions,
 ): Promise<{ memos: Memo[]; nextCursor: string | null }> {
-	const where: string[] = [];
+	const where: string[] = ['m.deleted_at IS NULL'];
 	const params: unknown[] = [];
 	if (options.range) {
 		where.push('m.created_at >= ? AND m.created_at < ?');
@@ -177,7 +181,7 @@ export async function listMemos(
 		params.push(cursor.c, cursor.c, cursor.s, cursor.c, cursor.s, cursor.p);
 	}
 	const sql = `${MEMO_SELECT}
-		${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+		WHERE ${where.join(' AND ')}
 		ORDER BY m.created_at DESC, m.source_id DESC, m.position ASC
 		LIMIT ?`;
 	const { results } = await db
@@ -200,12 +204,70 @@ export async function listUpcoming(db: D1Database, now: Date, todayKst: string, 
 	const { results } = await db
 		.prepare(
 			`${MEMO_SELECT}
-			 WHERE (m.due_at IS NOT NULL AND m.due_at > ?)
-			    OR (m.due_at IS NULL AND m.due_date IS NOT NULL AND m.due_date >= ?)
+			 WHERE m.deleted_at IS NULL
+			   AND ((m.due_at IS NOT NULL AND m.due_at > ?)
+			     OR (m.due_at IS NULL AND m.due_date IS NOT NULL AND m.due_date >= ?))
 			 ORDER BY COALESCE(m.due_at, m.due_date) ASC
 			 LIMIT ?`,
 		)
 		.bind(now.toISOString(), todayKst, max)
 		.all<MemoRow>();
 	return results.map(toMemo);
+}
+
+/**
+ * Persist a drag & drop order: the i-th id gets manual_rank i (one atomic batch).
+ * Returns how many of the ids exist; unknown ids are ignored.
+ */
+export async function saveManualOrder(db: D1Database, ids: string[]): Promise<number> {
+	const results = await db.batch(
+		ids.map((id, index) => db.prepare('UPDATE memos SET manual_rank = ? WHERE id = ?').bind(index, id)),
+	);
+	return results.reduce((sum, r) => sum + (r.meta.changes ?? 0), 0);
+}
+
+/** Check or uncheck a memo as done. Returns the updated memo, or null if it does not exist. */
+export async function setCompleted(db: D1Database, id: string, completed: boolean, now: Date): Promise<Memo | null> {
+	const result = await db
+		.prepare('UPDATE memos SET completed_at = ? WHERE id = ? AND deleted_at IS NULL')
+		.bind(completed ? now.toISOString() : null, id)
+		.run();
+	if (!result.meta.changes) return null;
+	const row = await db.prepare(`${MEMO_SELECT} WHERE m.id = ?`).bind(id).first<MemoRow>();
+	return row ? toMemo(row) : null;
+}
+
+/*
+ * "Overdue" = has a deadline, the deadline has passed, and it is not done.
+ * - exact time (due_at, UTC): passed once due_at <= now;
+ * - date only (due_date, KST day): passed once that KST day is over (due_date < today).
+ * This is the exact complement of listUpcoming for dated memos; no data is copied.
+ */
+const OVERDUE_WHERE = `m.deleted_at IS NULL AND m.completed_at IS NULL
+	AND ((m.due_at IS NOT NULL AND m.due_at <= ?)
+	  OR (m.due_at IS NULL AND m.due_date IS NOT NULL AND m.due_date < ?))`;
+
+/** Overdue, not-done memos; most recently due first. */
+export async function listOverdue(db: D1Database, now: Date, todayKst: string, max = 50): Promise<Memo[]> {
+	const { results } = await db
+		.prepare(`${MEMO_SELECT} WHERE ${OVERDUE_WHERE} ORDER BY COALESCE(m.due_at, m.due_date) DESC LIMIT ?`)
+		.bind(now.toISOString(), todayKst, max)
+		.all<MemoRow>();
+	return results.map(toMemo);
+}
+
+export type DeleteResult = 'deleted' | 'not_found' | 'not_overdue';
+
+/**
+ * Hide an overdue, not-done memo (soft delete). Anything else is refused,
+ * so the shared board cannot be emptied through this endpoint.
+ */
+export async function deleteOverdueMemo(db: D1Database, id: string, now: Date, todayKst: string): Promise<DeleteResult> {
+	const result = await db
+		.prepare(`UPDATE memos AS m SET deleted_at = ? WHERE m.id = ? AND ${OVERDUE_WHERE}`)
+		.bind(now.toISOString(), id, now.toISOString(), todayKst)
+		.run();
+	if (result.meta.changes) return 'deleted';
+	const exists = await db.prepare('SELECT 1 FROM memos WHERE id = ? AND deleted_at IS NULL').bind(id).first();
+	return exists ? 'not_overdue' : 'not_found';
 }

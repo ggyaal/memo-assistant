@@ -12,10 +12,25 @@ import type {
 import { LIMITS } from '../shared/types.ts';
 import type { RunMemoAgent } from './agent-runner.ts';
 import { buildAgenda } from './agenda.ts';
-import { findSourceByRequestId, listMemos, listUpcoming } from './db.ts';
-import { clientKey, consumeAiQuota, readUsage } from './rate-limit.ts';
+import {
+	deleteOverdueMemo,
+	findSourceByRequestId,
+	listMemos,
+	listOverdue,
+	listUpcoming,
+	saveManualOrder,
+	setCompleted,
+} from './db.ts';
+import { clientKey, consumeAiQuota, consumeWindow, readUsage } from './rate-limit.ts';
 import { kstDate, kstDayRangeUtc } from './time.ts';
-import { CreateMemosRequestSchema, issuesToMessage, ListMemosQuerySchema } from './validation.ts';
+import {
+	CompleteRequestSchema,
+	CreateMemosRequestSchema,
+	issuesToMessage,
+	ListMemosQuerySchema,
+	MemoIdSchema,
+	ReorderRequestSchema,
+} from './validation.ts';
 
 export interface ApiBindings {
 	DB: D1Database;
@@ -34,7 +49,7 @@ type ApiContext = Context<{ Bindings: ApiBindings }>;
 
 function fail(
 	c: ApiContext,
-	status: 400 | 403 | 413 | 415 | 429 | 500 | 502 | 503 | 504,
+	status: 400 | 403 | 404 | 409 | 413 | 415 | 429 | 500 | 502 | 503 | 504,
 	error: ApiErrorCode,
 	message: string,
 ) {
@@ -91,6 +106,45 @@ function toPositiveInt(value: string | undefined, fallback: number): number {
 	return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+/**
+ * Cross-site protection for every state-changing route: requiring
+ * application/json forces a CORS preflight (which this API never answers),
+ * and a foreign Origin is rejected outright. Without this, another site could
+ * make visitors' browsers spend the AI quota or change the shared board.
+ */
+function crossSiteBlock(c: ApiContext, expectsJsonBody: boolean) {
+	if (expectsJsonBody && !/^application\/json\b/i.test(c.req.header('content-type') ?? '')) {
+		return fail(c, 415, 'invalid_request', 'Content-Type은 application/json이어야 합니다.');
+	}
+	const origin = c.req.header('origin');
+	if (origin && !isSameOrigin(origin, c.req.url)) {
+		return fail(c, 403, 'forbidden_origin', '허용되지 않은 출처의 요청입니다.');
+	}
+	return null;
+}
+
+/** Board edits (reorder/complete/delete) per client per minute. */
+const MUTATIONS_PER_MINUTE = 30;
+
+async function mutationLimit(c: ApiContext, now: Date) {
+	const client = await clientKey(c.req.header('cf-connecting-ip'));
+	const decision = await consumeWindow(c.env.DB, `edit:${client}`, MUTATIONS_PER_MINUTE, 60_000, now);
+	if (decision.allowed) return null;
+	c.header('Retry-After', String(decision.retryAfterSeconds));
+	return fail(c, 429, 'rate_limited', '변경 요청이 너무 잦습니다. 잠시 후 다시 시도해 주세요.');
+}
+
+/** Parse a small JSON body; undefined when it is too large or not JSON. */
+async function readJson(c: ApiContext): Promise<unknown> {
+	const raw = await c.req.text();
+	if (new TextEncoder().encode(raw).length > LIMITS.bodyBytesMax) return undefined;
+	try {
+		return JSON.parse(raw);
+	} catch {
+		return undefined;
+	}
+}
+
 function dailyLimit(env: ApiBindings): number {
 	return toPositiveInt(env.DAILY_AI_LIMIT, 150);
 }
@@ -129,11 +183,81 @@ export function createApi(deps: ApiDeps) {
 	api.get('/agenda', async (c) => {
 		try {
 			const current = now();
-			const upcoming = await listUpcoming(c.env.DB, current, kstDate(current));
-			return c.json<AgendaResponse>(buildAgenda(upcoming, LIMITS.agendaMax));
+			const today = kstDate(current);
+			const [upcoming, overdue] = await Promise.all([
+				listUpcoming(c.env.DB, current, today),
+				listOverdue(c.env.DB, current, today),
+			]);
+			return c.json<AgendaResponse>(buildAgenda(upcoming, LIMITS.agendaMax, overdue));
 		} catch (error) {
 			console.error('agenda failed', describeError(error));
 			return fail(c, 500, 'db_error', '다가오는 일정을 불러오지 못했습니다.');
+		}
+	});
+
+	// Drag & drop order of the priority list. Shared board: applies to every visitor.
+	api.put('/agenda/order', async (c) => {
+		const blocked = crossSiteBlock(c, true);
+		if (blocked) return blocked;
+		const body = await readJson(c);
+		if (body === undefined) return fail(c, 400, 'invalid_request', 'JSON 형식이 올바르지 않습니다.');
+		const parsed = v.safeParse(ReorderRequestSchema, body);
+		if (!parsed.success) return fail(c, 400, 'invalid_request', issuesToMessage(parsed.issues));
+		try {
+			const limited = await mutationLimit(c, now());
+			if (limited) return limited;
+			const updated = await saveManualOrder(c.env.DB, parsed.output.ids);
+			if (updated === 0) return fail(c, 404, 'not_found', '정렬할 메모를 찾지 못했습니다.');
+			return c.json({ updated });
+		} catch (error) {
+			console.error('reorder failed', describeError(error));
+			return fail(c, 500, 'db_error', '순서를 저장하지 못했습니다.');
+		}
+	});
+
+	// Done / not done. Shared board: applies to every visitor.
+	api.patch('/memos/:id', async (c) => {
+		const blocked = crossSiteBlock(c, true);
+		if (blocked) return blocked;
+		const id = v.safeParse(MemoIdSchema, c.req.param('id'));
+		if (!id.success) return fail(c, 400, 'invalid_request', issuesToMessage(id.issues));
+		const body = await readJson(c);
+		if (body === undefined) return fail(c, 400, 'invalid_request', 'JSON 형식이 올바르지 않습니다.');
+		const parsed = v.safeParse(CompleteRequestSchema, body);
+		if (!parsed.success) return fail(c, 400, 'invalid_request', issuesToMessage(parsed.issues));
+		try {
+			const current = now();
+			const limited = await mutationLimit(c, current);
+			if (limited) return limited;
+			const memo = await setCompleted(c.env.DB, id.output, parsed.output.completed, current);
+			if (!memo) return fail(c, 404, 'not_found', '메모를 찾지 못했습니다.');
+			return c.json({ memo });
+		} catch (error) {
+			console.error('complete failed', describeError(error));
+			return fail(c, 500, 'db_error', '완료 상태를 저장하지 못했습니다.');
+		}
+	});
+
+	// Remove an item from "지나버린 일". Soft delete, overdue + not-done only.
+	// Shared board: the memo disappears for every visitor.
+	api.delete('/memos/:id', async (c) => {
+		const blocked = crossSiteBlock(c, false);
+		if (blocked) return blocked;
+		const id = v.safeParse(MemoIdSchema, c.req.param('id'));
+		if (!id.success) return fail(c, 400, 'invalid_request', issuesToMessage(id.issues));
+		try {
+			const current = now();
+			const limited = await mutationLimit(c, current);
+			if (limited) return limited;
+			const result = await deleteOverdueMemo(c.env.DB, id.output, current, kstDate(current));
+			if (result === 'not_found') return fail(c, 404, 'not_found', '메모를 찾지 못했습니다.');
+			if (result === 'not_overdue') {
+				return fail(c, 409, 'conflict', '기한이 지났고 완료되지 않은 메모만 삭제할 수 있습니다.');
+			}
+			return c.json({ deleted: id.output });
+		} catch (error) {
+			console.error('delete failed', describeError(error));
+			return fail(c, 500, 'db_error', '삭제하지 못했습니다.');
 		}
 	});
 
@@ -157,17 +281,8 @@ export function createApi(deps: ApiDeps) {
 	});
 
 	api.post('/memos', async (c) => {
-		// Cross-site protection: requiring application/json forces a CORS preflight
-		// (which this API never answers), and a foreign Origin is rejected outright.
-		// Without this, another site could make visitors' browsers spend the AI quota.
-		const contentType = c.req.header('content-type') ?? '';
-		if (!/^application\/json\b/i.test(contentType)) {
-			return fail(c, 415, 'invalid_request', 'Content-Type은 application/json이어야 합니다.');
-		}
-		const origin = c.req.header('origin');
-		if (origin && !isSameOrigin(origin, c.req.url)) {
-			return fail(c, 403, 'forbidden_origin', '허용되지 않은 출처의 요청입니다.');
-		}
+		const blocked = crossSiteBlock(c, true);
+		if (blocked) return blocked;
 
 		const declared = Number(c.req.header('content-length') ?? '0');
 		if (declared > LIMITS.bodyBytesMax) return fail(c, 413, 'payload_too_large', '요청이 너무 큽니다.');

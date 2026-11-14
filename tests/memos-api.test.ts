@@ -235,14 +235,232 @@ describe('GET /api/agenda', () => {
 		clock = new Date('2026-11-10T05:00:00Z'); // 11-10 14:00 KST: 장보기(11-09) is past, 병원(15:00) is not
 		expect((await agenda(app)).reminders.map((m) => m.title)).toEqual(['병원 예약']);
 		clock = new Date('2026-11-10T07:00:00Z'); // 16:00 KST: both past
-		expect(await agenda(app)).toEqual({ reminders: [], ranked: [] });
+		const later = (await (await app.request('/api/agenda')).json()) as { reminders: unknown[]; ranked: unknown[]; overdue: { title: string }[] };
+		expect(later.reminders).toEqual([]);
+		expect(later.ranked).toEqual([]);
+		expect(later.overdue.map((m) => m.title)).toEqual(['병원 예약', '장보기']); // they move to 지나버린 일
 	});
 
 	it('returns empty lists with no-store caching', async () => {
 		const res = await makeApp(toolRunner(db)).request('/api/agenda');
 		expect(res.status).toBe(200);
 		expect(res.headers.get('cache-control')).toBe('no-store');
-		expect(await res.json()).toEqual({ reminders: [], ranked: [] });
+		expect(await res.json()).toEqual({ reminders: [], ranked: [], overdue: [] });
+	});
+});
+
+describe('PUT /api/agenda/order (feature 1: drag & drop)', () => {
+	type Ranked = { ranked: { id: string; title: string; manual_rank: number | null }[] };
+	const ABC = [
+		{ title: 'A', content: 'A 하기', category: 'todo', due_at: null, due_date: '2026-11-10', due_text: '내일', priority: 'high' },
+		{ title: 'B', content: 'B 하기', category: 'todo', due_at: null, due_date: '2026-11-11', due_text: '모레', priority: 'medium' },
+		{ title: 'C', content: 'C 하기', category: 'todo', due_at: null, due_date: '2026-11-12', due_text: '글피', priority: 'low' },
+	];
+	const RAW_ABC = '내일 A, 모레 B, 글피 C';
+	const ranked = async (app: ReturnType<typeof makeApp>) => ((await (await app.request('/api/agenda')).json()) as Ranked).ranked;
+	const put = (app: ReturnType<typeof makeApp>, payload: unknown, headers: Record<string, string> = {}) =>
+		app.request('/api/agenda/order', { method: 'PUT', body: typeof payload === 'string' ? payload : JSON.stringify(payload), headers });
+
+	async function seedABC() {
+		const app = makeApp(toolRunner(db, ABC));
+		expect((await app.request('/api/memos', { method: 'POST', body: body(RAW_ABC) })).status).toBe(201);
+		return app;
+	}
+
+	it('A, B, C → C, A, B is saved and still C, A, B on the next load', async () => {
+		const app = await seedABC();
+		const before = await ranked(app);
+		expect(before.map((m) => m.title)).toEqual(['A', 'B', 'C']);
+		const byTitle = Object.fromEntries(before.map((m) => [m.title, m.id]));
+
+		const res = await put(app, { ids: [byTitle.C, byTitle.A, byTitle.B] });
+		expect(res.status).toBe(200);
+		expect(await res.json()).toEqual({ updated: 3 });
+
+		// "Refresh": a fresh read from D1.
+		const after = await ranked(app);
+		expect(after.map((m) => m.title)).toEqual(['C', 'A', 'B']);
+		expect(after.map((m) => m.manual_rank)).toEqual([0, 1, 2]);
+	});
+
+	it('a later AI-organized memo does not overwrite the user order', async () => {
+		const app = await seedABC();
+		const ids = Object.fromEntries((await ranked(app)).map((m) => [m.title, m.id]));
+		await put(app, { ids: [ids.C, ids.A, ids.B] });
+		const runner = toolRunner(db, [{ title: 'NEW', content: '내일 급한 일', category: 'todo', due_at: null, due_text: '내일', priority: 'high' }]);
+		const app2 = makeApp(runner);
+		expect((await app2.request('/api/memos', { method: 'POST', body: body('내일 급한 일') })).status).toBe(201);
+		expect((await ranked(app2)).map((m) => m.title)).toEqual(['C', 'A', 'B', 'NEW']);
+	});
+
+	it.each([
+		['empty list', { ids: [] }],
+		['duplicate ids', { ids: ['00000000-0000-4000-8000-0000000000aa', '00000000-0000-4000-8000-0000000000aa'] }],
+		['non-uuid id', { ids: ['abc'] }],
+		['more than 20', { ids: Array.from({ length: 21 }, (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`) }],
+		['bad JSON', '{nope'],
+	])('rejects %s with 400', async (_label, payload) => {
+		const res = await put(makeApp(toolRunner(db)), payload);
+		expect(res.status).toBe(400);
+	});
+
+	it('returns 404 when none of the ids exist', async () => {
+		const res = await put(makeApp(toolRunner(db)), { ids: ['00000000-0000-4000-8000-0000000000ff'] });
+		expect(res.status).toBe(404);
+	});
+
+	it('blocks cross-site and non-JSON requests', async () => {
+		const app = await seedABC();
+		const id = (await ranked(app))[0].id;
+		expect((await put(app, { ids: [id] }, { origin: 'https://evil.example' })).status).toBe(403);
+		expect((await put(app, { ids: [id] }, { 'content-type': 'text/plain' })).status).toBe(415);
+	});
+
+	it('rate limits board edits per client', async () => {
+		const app = await seedABC();
+		const id = (await ranked(app))[0].id;
+		const statuses: number[] = [];
+		for (let i = 0; i < 31; i++) statuses.push((await put(app, { ids: [id] })).status);
+		expect(statuses.slice(0, 30).every((s) => s === 200)).toBe(true);
+		expect(statuses[30]).toBe(429);
+	});
+});
+
+describe('PATCH /api/memos/:id (feature 2: done check)', () => {
+	type List = { memos: { id: string; title: string; completed_at: string | null }[] };
+	const list = async (app: ReturnType<typeof makeApp>) => ((await (await app.request('/api/memos?scope=all')).json()) as List).memos;
+	const patch = (app: ReturnType<typeof makeApp>, id: string, payload: unknown, headers: Record<string, string> = {}) =>
+		app.request(`/api/memos/${id}`, { method: 'PATCH', body: typeof payload === 'string' ? payload : JSON.stringify(payload), headers });
+
+	async function seed() {
+		const app = makeApp(toolRunner(db));
+		expect((await app.request('/api/memos', { method: 'POST', body: body() })).status).toBe(201);
+		const memos = await list(app);
+		return { app, hospital: memos.find((m) => m.title === '병원 예약')! };
+	}
+
+	it('check → saved (survives a reload) → uncheck → back to not done', async () => {
+		const { app, hospital } = await seed();
+		expect(hospital.completed_at).toBeNull();
+
+		const checked = await patch(app, hospital.id, { completed: true });
+		expect(checked.status).toBe(200);
+		expect(((await checked.json()) as { memo: { completed_at: string } }).memo.completed_at).toBe(clock.toISOString());
+		expect((await list(app)).find((m) => m.id === hospital.id)?.completed_at).toBe(clock.toISOString());
+
+		const unchecked = await patch(app, hospital.id, { completed: false });
+		expect(unchecked.status).toBe(200);
+		expect((await list(app)).find((m) => m.id === hospital.id)?.completed_at).toBeNull();
+	});
+
+	it('done memos leave the reminder list but stay in the priority list', async () => {
+		const { app, hospital } = await seed();
+		await patch(app, hospital.id, { completed: true });
+		const agenda = (await (await app.request('/api/agenda')).json()) as { reminders: { id: string }[]; ranked: { id: string; completed_at: string | null }[] };
+		expect(agenda.reminders.map((m) => m.id)).not.toContain(hospital.id);
+		expect(agenda.ranked.find((m) => m.id === hospital.id)?.completed_at).not.toBeNull();
+	});
+
+	it.each([
+		['bad id', 'abc', { completed: true }, 400],
+		['missing flag', '00000000-0000-4000-8000-0000000000aa', {}, 400],
+		['non-boolean flag', '00000000-0000-4000-8000-0000000000aa', { completed: 'yes' }, 400],
+		['unknown memo', '00000000-0000-4000-8000-0000000000aa', { completed: true }, 404],
+	])('rejects %s', async (_label, id, payload, status) => {
+		expect((await patch(makeApp(toolRunner(db)), id, payload)).status).toBe(status);
+	});
+
+	it('blocks cross-site and non-JSON requests', async () => {
+		const { app, hospital } = await seed();
+		expect((await patch(app, hospital.id, { completed: true }, { origin: 'https://evil.example' })).status).toBe(403);
+		expect((await patch(app, hospital.id, { completed: true }, { 'content-type': 'text/plain' })).status).toBe(415);
+		expect((await list(app)).find((m) => m.id === hospital.id)?.completed_at).toBeNull();
+	});
+});
+
+describe('지나버린 일 (feature 3: overdue list + delete)', () => {
+	type Item = { id: string; title: string; completed_at: string | null };
+	type Agenda = { reminders: Item[]; ranked: Item[]; overdue: Item[] };
+	const agenda = async (app: ReturnType<typeof makeApp>) => (await (await app.request('/api/agenda')).json()) as Agenda;
+	const overdueTitles = async (app: ReturnType<typeof makeApp>) => (await agenda(app)).overdue.map((m) => m.title);
+	const allTitles = async (app: ReturnType<typeof makeApp>) =>
+		((await (await app.request('/api/memos?scope=all')).json()) as { memos: Item[] }).memos.map((m) => m.title);
+	const del = (app: ReturnType<typeof makeApp>, id: string, headers: Record<string, string> = {}) =>
+		app.request(`/api/memos/${id}`, { method: 'DELETE', headers });
+
+	// Saved on 11-09 21:40 KST: 장보기 (date-only 11-09), 병원 예약 (11-10 15:00 KST), AI 검색 기능 (no deadline).
+	async function seed() {
+		const app = makeApp(toolRunner(db));
+		expect((await app.request('/api/memos', { method: 'POST', body: body() })).status).toBe(201);
+		const memos = ((await (await app.request('/api/memos?scope=all')).json()) as { memos: Item[] }).memos;
+		const id = (title: string) => memos.find((m) => m.title === title)!.id;
+		return { app, shopping: id('장보기'), hospital: id('병원 예약'), idea: id('AI 검색 기능') };
+	}
+
+	it('yesterday + not done → shown; no deadline → not shown; today/future → not shown', async () => {
+		const { app } = await seed();
+		expect(await overdueTitles(app)).toEqual([]); // nothing has passed yet on 11-09
+		clock = new Date('2026-11-10T03:00:00Z'); // 11-10 12:00 KST
+		// 장보기 was due yesterday (date only) → overdue. 병원 예약 is today 15:00 → not yet. The idea has no deadline.
+		expect(await overdueTitles(app)).toEqual(['장보기']);
+		clock = new Date('2026-11-11T03:00:00Z'); // 11-11 12:00 KST: 병원 예약 (yesterday 15:00) has passed too
+		expect(await overdueTitles(app)).toEqual(['병원 예약', '장보기']);
+	});
+
+	it('a date-only deadline is not overdue until that KST day is over', async () => {
+		const { app } = await seed();
+		clock = new Date('2026-11-09T14:59:59Z'); // 11-09 23:59:59 KST
+		expect(await overdueTitles(app)).toEqual([]);
+		clock = new Date('2026-11-09T15:00:00Z'); // 11-10 00:00 KST
+		expect(await overdueTitles(app)).toEqual(['장보기']);
+	});
+
+	it('yesterday + done → not shown; unchecking brings it back', async () => {
+		const { app, shopping } = await seed();
+		clock = new Date('2026-11-10T03:00:00Z');
+		const patch = (completed: boolean) =>
+			app.request(`/api/memos/${shopping}`, { method: 'PATCH', body: JSON.stringify({ completed }) });
+		expect((await patch(true)).status).toBe(200);
+		expect(await overdueTitles(app)).toEqual([]);
+		expect((await patch(false)).status).toBe(200);
+		expect(await overdueTitles(app)).toEqual(['장보기']);
+	});
+
+	it('delete → gone from 지나버린 일 and from every list, and stays gone after reload', async () => {
+		const { app, shopping } = await seed();
+		clock = new Date('2026-11-10T03:00:00Z');
+		const res = await del(app, shopping);
+		expect(res.status).toBe(200);
+		expect(await res.json()).toEqual({ deleted: shopping });
+		expect(await overdueTitles(app)).toEqual([]);
+		expect(await allTitles(app)).toEqual(['병원 예약', 'AI 검색 기능']);
+		// Reload later: still gone. Soft delete keeps the row in D1 (recoverable).
+		clock = new Date('2026-11-12T03:00:00Z');
+		expect(await overdueTitles(app)).toEqual(['병원 예약']);
+		const row = await db.prepare('SELECT deleted_at FROM memos WHERE id = ?').bind(shopping).first<{ deleted_at: string }>();
+		expect(row?.deleted_at).toBe('2026-11-10T03:00:00.000Z');
+		// A deleted memo cannot be checked or deleted again.
+		expect((await app.request(`/api/memos/${shopping}`, { method: 'PATCH', body: JSON.stringify({ completed: true }) })).status).toBe(404);
+		expect((await del(app, shopping)).status).toBe(404);
+	});
+
+	it('only overdue, not-done memos can be deleted (409 otherwise)', async () => {
+		const { app, shopping, hospital, idea } = await seed();
+		clock = new Date('2026-11-10T03:00:00Z');
+		expect((await del(app, hospital)).status).toBe(409); // not due yet
+		expect((await del(app, idea)).status).toBe(409); // no deadline
+		await app.request(`/api/memos/${shopping}`, { method: 'PATCH', body: JSON.stringify({ completed: true }) });
+		expect((await del(app, shopping)).status).toBe(409); // done
+		expect(await allTitles(app)).toHaveLength(3);
+	});
+
+	it('rejects bad ids, unknown memos and cross-site requests', async () => {
+		const { app, shopping } = await seed();
+		clock = new Date('2026-11-10T03:00:00Z');
+		expect((await del(app, 'abc')).status).toBe(400);
+		expect((await del(app, '00000000-0000-4000-8000-0000000000ff')).status).toBe(404);
+		expect((await del(app, shopping, { origin: 'https://evil.example' })).status).toBe(403);
+		expect(await overdueTitles(app)).toEqual(['장보기']);
 	});
 });
 

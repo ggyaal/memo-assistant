@@ -91,7 +91,7 @@ describe('built Worker (workerd + local D1 + Flue Durable Object)', () => {
 	it('serves the agenda', async () => {
 		const res = await mf.dispatchFetch('http://localhost/api/agenda');
 		expect(res.status).toBe(200);
-		expect(await res.json()).toEqual({ reminders: [], ranked: [] });
+		expect(await res.json()).toEqual({ reminders: [], ranked: [], overdue: [] });
 	});
 
 	it('serves usage numbers', async () => {

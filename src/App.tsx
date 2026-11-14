@@ -22,6 +22,8 @@ export function App() {
 	const [lastResult, setLastResult] = useState<CreateMemosResponse | null>(null);
 	const [refreshKey, setRefreshKey] = useState(0);
 	const [usageKey, setUsageKey] = useState(0);
+	// Bumped after a board edit (done / reorder / delete) to reload the side panel only.
+	const [agendaKey, setAgendaKey] = useState(0);
 
 	function saveNickname(event: FormEvent) {
 		event.preventDefault();
@@ -96,7 +98,7 @@ export function App() {
 					</h2>
 					<div className="cards">
 						{lastResult.memos.map((memo) => (
-							<MemoCard key={memo.id} memo={memo} showSource={false} />
+							<MemoCard key={memo.id} memo={memo} showSource={false} onChanged={() => setRefreshKey((k) => k + 1)} />
 						))}
 					</div>
 				</section>
@@ -105,11 +107,11 @@ export function App() {
 
 			{/* Side panel on wide screens; between the input and the list on mobile. */}
 			<aside className="layout__side" aria-label="다가오는 알림과 일정 우선순위">
-				<AgendaPanel refreshKey={refreshKey} />
+				<AgendaPanel refreshKey={refreshKey + agendaKey} onChanged={() => setRefreshKey((k) => k + 1)} />
 			</aside>
 
 			<div className="layout__bottom">
-				<MemoList refreshKey={refreshKey} />
+				<MemoList refreshKey={refreshKey} onChanged={() => setAgendaKey((k) => k + 1)} />
 
 				<footer className="muted small center footer">
 					AX School Build Your Agent · Flue + Cloudflare Workers AI + D1 프로토타입

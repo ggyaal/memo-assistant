@@ -39,6 +39,10 @@ export interface Memo {
 	/** AI-assigned priority; null for memos saved before priorities existed. */
 	priority: MemoPriority | null;
 	priority_reason: string | null;
+	/** Position set by drag & drop in the priority list (shared by all visitors); null = AI order. */
+	manual_rank: number | null;
+	/** When the memo was checked as done (UTC ISO 8601); null = not done. Shared by all visitors. */
+	completed_at: string | null;
 	/** When the memo was saved (UTC ISO 8601). Not the schedule time. */
 	created_at: string;
 }
@@ -63,8 +67,19 @@ export interface ListMemosResponse {
 export interface AgendaResponse {
 	/** Upcoming memos with a recommended reminder, soonest first. */
 	reminders: Memo[];
-	/** Upcoming dated memos ranked by priority, then by how soon they are due. */
+	/** Not-done memos whose deadline has passed ("지나버린 일"), most recently due first. */
+	overdue: Memo[];
+	/** Upcoming dated memos: user-ordered ones first (manual_rank), then by AI priority and how soon they are due. */
 	ranked: Memo[];
+}
+
+export interface CompleteRequest {
+	completed: boolean;
+}
+
+export interface ReorderRequest {
+	/** Memo ids in the new top-to-bottom order of the priority list. */
+	ids: string[];
 }
 
 export interface UsageResponse {
@@ -84,6 +99,8 @@ export type ApiErrorCode =
 	| 'agent_timeout'
 	| 'agent_failed'
 	| 'not_saved'
+	| 'not_found'
+	| 'conflict'
 	| 'db_error';
 
 export interface ApiError {

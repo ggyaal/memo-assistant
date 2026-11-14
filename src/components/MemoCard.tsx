@@ -1,19 +1,39 @@
 import { useState } from 'react';
-import { CATEGORY_LABELS, formatDue, formatKst, PRIORITY_LABELS } from '../client/format.ts';
+import { CATEGORY_LABELS, formatDue, formatKst, isOverdue, PRIORITY_LABELS } from '../client/format.ts';
 import type { Memo } from '../shared/types.ts';
+import { CompleteCheckbox } from './CompleteCheckbox.tsx';
 
 // All model-produced strings are rendered as plain text nodes (never as HTML).
-export function MemoCard({ memo, showSource = true }: { memo: Memo; showSource?: boolean }) {
+export function MemoCard({
+	memo: initial,
+	showSource = true,
+	onChanged,
+}: {
+	memo: Memo;
+	showSource?: boolean;
+	/** Called after the memo was changed on the board (e.g. checked as done). */
+	onChanged?: () => void;
+}) {
 	const [open, setOpen] = useState(false);
+	const [memo, setMemo] = useState(initial);
+	const done = memo.completed_at !== null;
 	return (
-		<article className={`memo-card memo-card--${memo.category}`}>
+		<article className={`memo-card memo-card--${memo.category}${done ? ' is-done' : ''}`}>
 			<header className="memo-card__header">
+				<CompleteCheckbox
+					memo={memo}
+					onChange={(saved) => {
+						setMemo(saved);
+						onChanged?.();
+					}}
+				/>
 				<span className={`badge badge--${memo.category}`}>{CATEGORY_LABELS[memo.category]}</span>
 				{memo.priority && (
 					<span className={`badge badge--priority-${memo.priority}`} title={memo.priority_reason ?? undefined}>
 						중요도 {PRIORITY_LABELS[memo.priority]}
 					</span>
 				)}
+				{isOverdue(memo) && <span className="badge badge--overdue">기한 지남</span>}
 				<h3 className="memo-card__title">{memo.title}</h3>
 			</header>
 			<p className="memo-card__content">{memo.content}</p>
@@ -34,6 +54,7 @@ export function MemoCard({ memo, showSource = true }: { memo: Memo; showSource?:
 			<footer className="memo-card__footer muted small">
 				<span>by {memo.nickname}</span>
 				<span>등록 {formatKst(memo.created_at)}</span>
+				{done && memo.completed_at && <span>완료 {formatKst(memo.completed_at)}</span>}
 				{showSource && (
 					<button type="button" className="link-button" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
 						{open ? '원문 닫기' : '원문 보기'}

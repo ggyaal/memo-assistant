@@ -6,7 +6,7 @@ import { MemoCard } from './MemoCard.tsx';
 
 type Scope = 'today' | 'all';
 
-export function MemoList({ refreshKey }: { refreshKey: number }) {
+export function MemoList({ refreshKey, onChanged }: { refreshKey: number; onChanged?: () => void }) {
 	const [scope, setScope] = useState<Scope>('today');
 	const [category, setCategory] = useState<MemoCategory | ''>('');
 	const [memos, setMemos] = useState<Memo[]>([]);
@@ -77,7 +77,7 @@ export function MemoList({ refreshKey }: { refreshKey: number }) {
 			)}
 			<div className="cards">
 				{memos.map((memo) => (
-					<MemoCard key={memo.id} memo={memo} />
+					<MemoCard key={`${memo.id}:${memo.completed_at ?? ''}`} memo={memo} onChanged={onChanged} />
 				))}
 			</div>
 			{loading && <p className="muted center">불러오는 중…</p>}

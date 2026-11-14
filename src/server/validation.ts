@@ -27,6 +27,21 @@ export const CreateMemosRequestSchema = v.object({
 	requestId: v.pipe(v.string(), v.uuid('requestId 형식이 올바르지 않습니다.')),
 });
 
+export const CompleteRequestSchema = v.object({
+	completed: v.boolean('completed는 true 또는 false여야 합니다.'),
+});
+
+export const MemoIdSchema = v.pipe(v.string(), v.uuid('메모 id 형식이 올바르지 않습니다.'));
+
+export const ReorderRequestSchema = v.object({
+	ids: v.pipe(
+		v.array(v.pipe(v.string(), v.uuid('메모 id 형식이 올바르지 않습니다.'))),
+		v.minLength(1, '정렬할 메모가 없습니다.'),
+		v.maxLength(LIMITS.agendaMax, `한 번에 ${LIMITS.agendaMax}개까지 정렬할 수 있습니다.`),
+		v.check((ids) => new Set(ids).size === ids.length, '같은 메모가 중복되었습니다.'),
+	),
+});
+
 export type CreateMemosInput = v.InferOutput<typeof CreateMemosRequestSchema>;
 
 export const ListMemosQuerySchema = v.object({

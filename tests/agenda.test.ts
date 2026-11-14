@@ -20,6 +20,8 @@ function memo(over: Partial<Memo>): Memo {
 		reminder_reason: null,
 		priority: null,
 		priority_reason: null,
+		manual_rank: null,
+		completed_at: null,
 		created_at: '2026-11-09T12:00:00.000Z',
 		...over,
 	};
@@ -50,5 +52,37 @@ describe('buildAgenda', () => {
 
 	it('reads a date-only deadline as 00:00 KST of that day', () => {
 		expect(new Date(dueInstant({ due_at: null, due_date: '2026-11-09' })).toISOString()).toBe('2026-11-08T15:00:00.000Z');
+	});
+});
+
+describe('byListOrder (drag & drop wins over AI order)', () => {
+	const a = memo({ title: 'A', due_date: '2026-11-10', priority: 'high' });
+	const b = memo({ title: 'B', due_date: '2026-11-11', priority: 'medium' });
+	const c = memo({ title: 'C', due_date: '2026-11-12', priority: 'low' });
+
+	it('uses AI priority when nobody has reordered', () => {
+		expect(buildAgenda([c, b, a], 20).ranked.map((m) => m.title)).toEqual(['A', 'B', 'C']);
+	});
+
+	it('keeps the user order C, A, B regardless of AI priority', () => {
+		const ranked = buildAgenda([{ ...a, manual_rank: 1 }, { ...b, manual_rank: 2 }, { ...c, manual_rank: 0 }], 20).ranked;
+		expect(ranked.map((m) => m.title)).toEqual(['C', 'A', 'B']);
+	});
+
+	it('puts memos nobody placed yet below the user order (even if AI says high)', () => {
+		const urgent = memo({ title: 'NEW', due_date: '2026-11-10', priority: 'high' });
+		const ranked = buildAgenda([urgent, { ...a, manual_rank: 1 }, { ...c, manual_rank: 0 }], 20).ranked;
+		expect(ranked.map((m) => m.title)).toEqual(['C', 'A', 'NEW']);
+	});
+});
+
+describe('completed memos in the agenda', () => {
+	const doneReminder = memo({ title: 'DONE', due_date: '2026-11-10', reminder_recommended: true, completed_at: '2026-11-09T13:00:00.000Z' });
+	const openReminder = memo({ title: 'OPEN', due_date: '2026-11-11', reminder_recommended: true });
+
+	it('drops done memos from reminders but keeps them (struck through) in the priority list', () => {
+		const agenda = buildAgenda([doneReminder, openReminder], 20);
+		expect(agenda.reminders.map((m) => m.title)).toEqual(['OPEN']);
+		expect(agenda.ranked.map((m) => m.title)).toEqual(['DONE', 'OPEN']);
 	});
 });

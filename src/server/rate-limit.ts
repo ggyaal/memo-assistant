@@ -30,6 +30,21 @@ async function bump(db: D1Database, key: string, expiresAt: string): Promise<num
 	return row?.count ?? 1;
 }
 
+/** Generic fixed-window counter: at most `limit` hits per `windowMs` for `key`. */
+export async function consumeWindow(
+	db: D1Database,
+	key: string,
+	limit: number,
+	windowMs: number,
+	now: Date,
+): Promise<{ allowed: true } | { allowed: false; retryAfterSeconds: number }> {
+	const windowStart = Math.floor(now.getTime() / windowMs) * windowMs;
+	const windowEnd = windowStart + windowMs;
+	const count = await bump(db, `${key}:${windowStart}`, new Date(windowEnd).toISOString());
+	if (count <= limit) return { allowed: true };
+	return { allowed: false, retryAfterSeconds: Math.max(1, Math.ceil((windowEnd - now.getTime()) / 1000)) };
+}
+
 /** One-way, non-reversible key for a client address (we never store raw IPs). */
 export async function clientKey(ip: string | null | undefined): Promise<string> {
 	const data = new TextEncoder().encode(`memo-assistant:${ip ?? 'unknown'}`);

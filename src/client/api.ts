@@ -1,10 +1,13 @@
 import type {
 	AgendaResponse,
 	ApiError,
+	CompleteRequest,
 	CreateMemosRequest,
 	CreateMemosResponse,
 	ListMemosResponse,
+	Memo,
 	MemoCategory,
+	ReorderRequest,
 	UsageResponse,
 } from '../shared/types.ts';
 
@@ -62,4 +65,24 @@ export function fetchUsage(): Promise<UsageResponse> {
 
 export function fetchAgenda(): Promise<AgendaResponse> {
 	return request('/api/agenda');
+}
+
+export function reorderAgenda(ids: string[]): Promise<{ updated: number }> {
+	return request('/api/agenda/order', {
+		method: 'PUT',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({ ids } satisfies ReorderRequest),
+	});
+}
+
+export function setMemoCompleted(id: string, completed: boolean): Promise<{ memo: Memo }> {
+	return request(`/api/memos/${encodeURIComponent(id)}`, {
+		method: 'PATCH',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({ completed } satisfies CompleteRequest),
+	});
+}
+
+export function deleteMemo(id: string): Promise<{ deleted: string }> {
+	return request(`/api/memos/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }

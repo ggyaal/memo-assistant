@@ -23,13 +23,27 @@ function priorityRank(memo: Memo): number {
 }
 
 /**
+ * Priority-list order. A user's drag & drop order (manual_rank) always wins and
+ * is never overwritten by the AI; memos nobody has placed yet follow below,
+ * by AI priority, then soonest, then oldest.
+ */
+export function byListOrder(a: Memo, b: Memo): number {
+	const aManual = a.manual_rank !== null;
+	const bManual = b.manual_rank !== null;
+	if (aManual !== bManual) return aManual ? -1 : 1;
+	if (aManual && bManual && a.manual_rank !== b.manual_rank) return a.manual_rank! - b.manual_rank!;
+	return priorityRank(a) - priorityRank(b) || bySoonest(a, b);
+}
+
+/**
  * Side-panel lists built from upcoming dated memos:
- * - reminders: memos the AI recommended a reminder for, soonest first;
- * - ranked: every upcoming dated memo, by AI priority, then soonest, then oldest.
+ * - reminders: not-yet-done memos the AI recommended a reminder for, soonest first;
+ * - ranked: every upcoming dated memo in list order (see byListOrder).
  * Nothing is sent anywhere; this only orders what is already stored.
  */
-export function buildAgenda(upcoming: Memo[], max: number): AgendaResponse {
-	const reminders = upcoming.filter((m) => m.reminder_recommended).sort(bySoonest).slice(0, max);
-	const ranked = [...upcoming].sort((a, b) => priorityRank(a) - priorityRank(b) || bySoonest(a, b)).slice(0, max);
-	return { reminders, ranked };
+export function buildAgenda(upcoming: Memo[], max: number, overdue: Memo[] = []): AgendaResponse {
+	// A finished task needs no reminder; it stays in the priority list (struck through).
+	const reminders = upcoming.filter((m) => m.reminder_recommended && !m.completed_at).sort(bySoonest).slice(0, max);
+	const ranked = [...upcoming].sort(byListOrder).slice(0, max);
+	return { reminders, ranked, overdue };
 }

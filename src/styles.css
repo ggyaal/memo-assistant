@@ -360,12 +360,8 @@ button:disabled {
 		grid-template-areas: 'top side' 'bottom side';
 		align-items: start;
 	}
-	.layout__side {
-		position: sticky;
-		top: 16px;
-		max-height: calc(100vh - 32px);
-		overflow-y: auto;
-	}
+	/* Not sticky: with three sections the panel can be taller than the screen,
+	   and an inner scroll area hid "지나버린 일" at the bottom. */
 }
 
 .agenda {
@@ -447,4 +443,104 @@ button:disabled {
 .badge--priority-unset {
 	color: var(--muted);
 	border-style: dashed;
+}
+
+/* Priority list drag & drop */
+.agenda__item--draggable {
+	cursor: grab;
+	border-radius: 6px;
+	transition: opacity 0.15s, background 0.15s;
+}
+.agenda__item--draggable:active {
+	cursor: grabbing;
+}
+.agenda__item.is-dragging {
+	opacity: 0.4;
+	background: var(--bg);
+	outline: 2px dashed var(--primary);
+}
+.agenda__item.drop-before {
+	box-shadow: inset 0 3px 0 0 var(--primary);
+}
+.agenda__item.drop-after {
+	box-shadow: inset 0 -3px 0 0 var(--primary);
+}
+.agenda__handle {
+	flex: none;
+	color: var(--muted);
+	font-size: 1.1rem;
+	line-height: 26px;
+	user-select: none;
+}
+.agenda__body {
+	flex: 1;
+}
+.agenda__move {
+	flex: none;
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+}
+.icon-button {
+	background: var(--bg);
+	border: 1px solid var(--border);
+	border-radius: 6px;
+	color: var(--text);
+	font-size: 0.7rem;
+	line-height: 1;
+	padding: 4px 6px;
+}
+
+/* Done check + strikethrough */
+.complete {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	flex: none;
+}
+.complete__box {
+	width: 18px;
+	height: 18px;
+	margin: 0;
+	accent-color: var(--todo);
+	cursor: pointer;
+}
+.memo-card.is-done .memo-card__title,
+.memo-card.is-done .memo-card__content,
+.agenda__item.is-done .agenda__name {
+	text-decoration: line-through;
+	text-decoration-thickness: 2px;
+	color: var(--muted);
+}
+.memo-card.is-done {
+	opacity: 0.75;
+}
+
+/* 지나버린 일 */
+.agenda__section--overdue {
+	border-color: color-mix(in srgb, var(--error) 35%, var(--border));
+}
+.agenda__item--overdue {
+	gap: 4px;
+}
+.agenda__time--overdue {
+	color: var(--error);
+}
+.badge--overdue {
+	color: var(--error);
+}
+.danger-button {
+	background: transparent;
+	color: var(--error);
+	border: 1px solid var(--error);
+	border-radius: 6px;
+	padding: 3px 10px;
+}
+
+/* Live status line: stays rendered for screen readers; collapses to 0 height when empty. */
+.agenda__status {
+	margin: 0;
+}
+.nowrap {
+	white-space: nowrap;
 }

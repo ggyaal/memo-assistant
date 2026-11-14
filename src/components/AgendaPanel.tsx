@@ -1,18 +1,15 @@
 import { useEffect, useState } from 'react';
 import { fetchAgenda } from '../client/api.ts';
-import { CATEGORY_LABELS, formatDue, PRIORITY_LABELS } from '../client/format.ts';
-import type { AgendaResponse, Memo } from '../shared/types.ts';
-
-function PriorityBadge({ memo }: { memo: Memo }) {
-	if (!memo.priority) return <span className="badge badge--priority-unset">우선순위 미지정</span>;
-	return <span className={`badge badge--priority-${memo.priority}`}>{PRIORITY_LABELS[memo.priority]}</span>;
-}
+import { formatDue } from '../client/format.ts';
+import type { AgendaResponse } from '../shared/types.ts';
+import { OverdueList } from './OverdueList.tsx';
+import { RankedList } from './RankedList.tsx';
 
 /**
- * Side panel: upcoming reminders in time order, and upcoming dated memos
- * ranked by AI priority. Display only — no notification is ever sent.
+ * Side panel: upcoming reminders in time order, and the priority list
+ * (drag & drop order, else AI priority). Display only — no notification is sent.
  */
-export function AgendaPanel({ refreshKey }: { refreshKey: number }) {
+export function AgendaPanel({ refreshKey, onChanged }: { refreshKey: number; onChanged: () => void }) {
 	const [agenda, setAgenda] = useState<AgendaResponse | null>(null);
 	const [failed, setFailed] = useState(false);
 
@@ -58,32 +55,26 @@ export function AgendaPanel({ refreshKey }: { refreshKey: number }) {
 
 			<section className="card agenda__section" aria-labelledby="agenda-ranked">
 				<h2 id="agenda-ranked" className="agenda__title">
-					📋 일정 우선순위 <span className="muted small">중요도 → 가까운 순</span>
+					📋 일정 우선순위 <span className="muted small">끌어서 순서 변경</span>
 				</h2>
 				{failed && <p className="error small">불러오지 못했습니다.</p>}
 				{agenda && agenda.ranked.length === 0 && <p className="muted small">기한이 있는 다가오는 메모가 없습니다.</p>}
-				{agenda && agenda.ranked.length > 0 && (
-					<ol className="agenda__list agenda__list--ranked">
-						{agenda.ranked.map((memo, index) => (
-							<li key={memo.id} className="agenda__item">
-								<span className="agenda__rank" aria-label={`${index + 1}위`}>
-									{index + 1}
-								</span>
-								<div className="agenda__body">
-									<span className="row">
-										<PriorityBadge memo={memo} />
-										<span className="agenda__name">{memo.title}</span>
-									</span>
-									<span className="agenda__time">
-										{formatDue(memo)} · {CATEGORY_LABELS[memo.category]}
-									</span>
-									{memo.priority_reason && <span className="muted small">{memo.priority_reason}</span>}
-								</div>
-							</li>
-						))}
-					</ol>
-				)}
-				<p className="muted small agenda__note">우선순위는 AI 판단이며 참고용입니다.</p>
+				{agenda && agenda.ranked.length > 0 && <RankedList items={agenda.ranked} onChanged={onChanged} />}
+				<p className="muted small agenda__note">
+					처음 순서는 AI 우선순위 → 가까운 순입니다. 끌거나 ▲▼로 바꾼 순서는 저장되며 <strong>모든 방문자에게 적용</strong>됩니다.
+				</p>
+			</section>
+
+			<section className="card agenda__section agenda__section--overdue" aria-labelledby="agenda-overdue">
+				<h2 id="agenda-overdue" className="agenda__title">
+					🕗 지나버린 일 <span className="muted small">기한 지남 · 미완료</span>
+					{agenda && agenda.overdue.length > 0 && <span className="badge badge--overdue">{agenda.overdue.length}</span>}
+				</h2>
+				{failed && <p className="error small">불러오지 못했습니다.</p>}
+				{agenda && <OverdueList items={agenda.overdue} onChanged={onChanged} />}
+				<p className="muted small agenda__note">
+					완료로 체크하면 이 목록에서 빠집니다. 삭제하면 <strong>모든 방문자의 목록에서 사라집니다</strong>.
+				</p>
 			</section>
 		</div>
 	);
