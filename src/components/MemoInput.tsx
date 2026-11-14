@@ -1,5 +1,7 @@
 import { type FormEvent, useRef, useState } from 'react';
 import { ApiRequestError, createMemos } from '../client/api.ts';
+import { describeSensitive, detectSensitive } from '../shared/privacy.ts';
+import { VoiceRecorder } from './VoiceRecorder.tsx';
 import { LIMITS, type CreateMemosResponse } from '../shared/types.ts';
 
 const EXAMPLE = '오늘 장 보고, 내일 오후 3시에 병원 예약해야 해. AI 검색 기능 아이디어도 메모해 줘.';
@@ -17,13 +19,16 @@ export function MemoInput({
 	const [text, setText] = useState('');
 	const [pending, setPending] = useState(false);
 	const [error, setError] = useState<{ message: string; retryable: boolean } | null>(null);
+	const sensitive = detectSensitive(text);
+	const [voiceBusy, setVoiceBusy] = useState(false);
+	const textarea = useRef<HTMLTextAreaElement>(null);
 	// Reused only when retrying the same text, so the server can de-duplicate.
 	const pendingRequest = useRef<{ text: string; requestId: string } | null>(null);
 
 	async function submit(event?: FormEvent) {
 		event?.preventDefault();
 		const trimmed = text.trim();
-		if (!trimmed || pending) return;
+		if (!trimmed || pending || voiceBusy || sensitive.length > 0) return;
 		if (pendingRequest.current?.text !== trimmed) {
 			pendingRequest.current = { text: trimmed, requestId: crypto.randomUUID() };
 		}
@@ -50,7 +55,17 @@ export function MemoInput({
 			<label htmlFor="memo-text" className="label">
 				여러 생각을 한 번에 적어 보세요
 			</label>
+			<VoiceRecorder
+				disabled={pending}
+				onBusyChange={setVoiceBusy}
+				onTranscript={(spoken) => {
+					// Append to whatever is already typed; the user reviews before submitting.
+					setText((current) => (current.trim() ? `${current.trim()} ${spoken}` : spoken).slice(0, LIMITS.textMax));
+					textarea.current?.focus();
+				}}
+			/>
 			<textarea
+				ref={textarea}
 				id="memo-text"
 				value={text}
 				onChange={(e) => setText(e.target.value)}
@@ -67,7 +82,12 @@ export function MemoInput({
 					예시 넣기
 				</button>
 			</div>
-			<button type="submit" className="primary" disabled={pending || !text.trim()}>
+			{sensitive.length > 0 && (
+				<p className="warning" role="alert">
+					⚠️ {describeSensitive(sensitive)}로 보이는 내용이 있어요. 모든 방문자에게 공개되므로 지우고 다시 적어 주세요.
+				</p>
+			)}
+			<button type="submit" className="primary" disabled={pending || voiceBusy || !text.trim() || sensitive.length > 0}>
 				{pending ? 'AI가 정리하는 중… (최대 1분)' : 'AI로 정리하기'}
 			</button>
 			{error && (

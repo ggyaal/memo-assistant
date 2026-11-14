@@ -22,7 +22,9 @@ import {
 	setCompleted,
 } from './db.ts';
 import { clientKey, consumeAiQuota, consumeWindow, readUsage } from './rate-limit.ts';
+import { describeSensitive, detectSensitive } from '../shared/privacy.ts';
 import { kstDate, kstDayRangeUtc } from './time.ts';
+import { AUDIO_MAX_BYTES, AUDIO_MIN_BYTES, type Transcriber, whisperTranscriber } from './transcribe.ts';
 import {
 	CompleteRequestSchema,
 	CreateMemosRequestSchema,
@@ -34,12 +36,14 @@ import {
 
 export interface ApiBindings {
 	DB: D1Database;
+	AI?: Ai;
 	RATE_LIMIT_PER_MINUTE?: string;
 	DAILY_AI_LIMIT?: string;
 }
 
 export interface ApiDeps {
 	runAgent: RunMemoAgent;
+	transcribe?: Transcriber;
 	now?: () => Date;
 	newId?: () => string;
 	agentTimeoutMs?: number;
@@ -49,7 +53,7 @@ type ApiContext = Context<{ Bindings: ApiBindings }>;
 
 function fail(
 	c: ApiContext,
-	status: 400 | 403 | 404 | 409 | 413 | 415 | 429 | 500 | 502 | 503 | 504,
+	status: 400 | 403 | 404 | 409 | 413 | 415 | 422 | 429 | 500 | 502 | 503 | 504,
 	error: ApiErrorCode,
 	message: string,
 ) {
@@ -123,6 +127,12 @@ function crossSiteBlock(c: ApiContext, expectsJsonBody: boolean) {
 	return null;
 }
 
+/** Voice: per client per minute, and for the whole app per UTC day (~47 Neurons/min each). */
+const VOICE_PER_MINUTE = 6;
+const VOICE_PER_DAY = 60;
+const DAY_MS = 86_400_000;
+const AUDIO_TYPE = /^audio\/(webm|ogg|mp4|mpeg|mp3|wav|x-wav|wave|aac|x-m4a|m4a|flac)\b/i;
+
 /** Board edits (reorder/complete/delete) per client per minute. */
 const MUTATIONS_PER_MINUTE = 30;
 
@@ -153,6 +163,7 @@ export function createApi(deps: ApiDeps) {
 	const now = deps.now ?? (() => new Date());
 	const newId = deps.newId ?? (() => crypto.randomUUID());
 	const timeoutMs = deps.agentTimeoutMs ?? 90_000;
+	const transcribe = deps.transcribe ?? whisperTranscriber;
 	const api = new Hono<{ Bindings: ApiBindings }>();
 
 	// API responses are JSON only: forbid framing, sniffing and any active content.
@@ -192,6 +203,55 @@ export function createApi(deps: ApiDeps) {
 		} catch (error) {
 			console.error('agenda failed', describeError(error));
 			return fail(c, 500, 'db_error', '다가오는 일정을 불러오지 못했습니다.');
+		}
+	});
+
+	// Speech → text for the input box. The audio is not stored; the text is only
+	// returned to the caller, who reviews it before anything is published.
+	api.post('/transcribe', async (c) => {
+		const contentType = c.req.header('content-type') ?? '';
+		if (!AUDIO_TYPE.test(contentType)) {
+			return fail(c, 415, 'invalid_request', '지원하지 않는 오디오 형식입니다.');
+		}
+		const blocked = crossSiteBlock(c, false);
+		if (blocked) return blocked;
+		if (Number(c.req.header('content-length') ?? '0') > AUDIO_MAX_BYTES) {
+			return fail(c, 413, 'payload_too_large', '녹음이 너무 깁니다. 1분 이내로 녹음해 주세요.');
+		}
+		const audio = new Uint8Array(await c.req.arrayBuffer());
+		if (audio.byteLength > AUDIO_MAX_BYTES) {
+			return fail(c, 413, 'payload_too_large', '녹음이 너무 깁니다. 1분 이내로 녹음해 주세요.');
+		}
+		if (audio.byteLength < AUDIO_MIN_BYTES) {
+			return fail(c, 422, 'empty_audio', '녹음된 소리가 거의 없어요. 조금 더 길게 말해 주세요.');
+		}
+		const current = now();
+		try {
+			const client = await clientKey(c.req.header('cf-connecting-ip'));
+			const perClient = await consumeWindow(c.env.DB, `voice:${client}`, VOICE_PER_MINUTE, 60_000, current);
+			const perDay = perClient.allowed
+				? await consumeWindow(c.env.DB, 'voice:global', VOICE_PER_DAY, DAY_MS, current)
+				: perClient;
+			if (!perDay.allowed) {
+				c.header('Retry-After', String(perDay.retryAfterSeconds));
+				return perClient.allowed
+					? fail(c, 429, 'daily_limit_reached', '오늘 음성 변환 한도에 도달했어요. 텍스트로 입력해 주세요.')
+					: fail(c, 429, 'rate_limited', '음성 변환 요청이 너무 잦습니다. 1분 후 다시 시도해 주세요.');
+			}
+		} catch (error) {
+			console.error('voice limit failed', describeError(error));
+			return fail(c, 500, 'db_error', '저장소에 접근하지 못했습니다.');
+		}
+		if (!c.env.AI) return fail(c, 503, 'transcribe_failed', '음성 변환을 사용할 수 없습니다.');
+		try {
+			const text = (await transcribe(c.env.AI, audio, contentType)).trim().slice(0, LIMITS.textMax);
+			if (!text) return fail(c, 422, 'empty_transcript', '음성을 알아듣지 못했어요. 다시 녹음하거나 텍스트로 입력해 주세요.');
+			return c.json({ text });
+		} catch (error) {
+			console.error('transcribe failed', describeError(error));
+			const classified = classifyAgentError(error);
+			if (classified.code === 'ai_quota_exceeded') return fail(c, 503, classified.code, classified.message);
+			return fail(c, 502, 'transcribe_failed', '음성을 텍스트로 바꾸지 못했어요. 다시 녹음하거나 텍스트로 입력해 주세요.');
 		}
 	});
 
@@ -301,6 +361,17 @@ export function createApi(deps: ApiDeps) {
 		const input = parsed.output;
 		const db = c.env.DB;
 
+		// Public board: refuse obvious personal/secret data before it is stored or sent to the AI.
+		const sensitive = detectSensitive(`${input.nickname}\n${input.text}`);
+		if (sensitive.length > 0) {
+			return fail(
+				c,
+				400,
+				'sensitive_info',
+				`모든 방문자에게 공개되는 메모라 ${describeSensitive(sensitive)}로 보이는 내용은 저장할 수 없어요. 해당 부분을 지우고 다시 시도해 주세요.`,
+			);
+		}
+
 		try {
 			// Idempotency: a retried request returns the stored result without another AI call.
 			const existing = await findSourceByRequestId(db, input.requestId);
@@ -352,7 +423,12 @@ export function createApi(deps: ApiDeps) {
 
 		const saved = await findSourceByRequestId(db, input.requestId).catch(() => null);
 		if (!saved) {
-			return fail(c, 502, 'not_saved', 'AI가 메모를 저장하지 못했습니다. 문장을 조금 바꿔 다시 시도해 주세요.');
+			return fail(
+				c,
+				502,
+				'not_saved',
+				'메모로 정리할 내용을 찾지 못했어요. 할 일·일정·떠오른 생각을 한두 문장으로 적어 다시 시도해 주세요. 입력한 글은 그대로 남아 있습니다.',
+			);
 		}
 		return c.json<CreateMemosResponse>({ duplicate: false, source: saved.source, memos: saved.memos }, 201);
 	});

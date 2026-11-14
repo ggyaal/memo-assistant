@@ -58,6 +58,8 @@ AX School **Build Your Agent** 과제용으로, 여러 사람이 공개 체험�
 - 서버가 정하는 값(nickname, requestId, sourceId, createdAt, 원문)은 에이전트 `initialData`로 넘기고 Tool이 클로저로 사용한다. Tool 입력 스키마에 넣지 않는다.
 - 모델 출력은 `src/server/validation.ts`의 `sanitizeMemo()`를 거친 뒤에만 저장한다(원문에 없는 기한 제거, 시각 표현이 없으면 `due_at` 제거, 오늘/내일/모레와 요일 표현을 요청 시점의 KST 날짜로 서버가 계산(`pinnedDay`)). 실제 모델은 지시를 어기고 "오늘"에 00:00을 넣거나 "금요일"을 한 주 뒤로 계산한 적이 있으므로 프롬프트만으로 막으려 하지 않는다.
 - `POST /api/memos`의 JSON Content-Type 강제와 Origin 검사는 크로스사이트 할당량 소모 방지책이다. 제거하거나 CORS를 열지 않는다. 상태를 바꾸는 새 라우트는 모두 `crossSiteBlock()`과 `mutationLimit()`을 거친다.
+- 공개 게시판 저장 전 `src/shared/privacy.ts`의 `detectSensitive()`로 서버가 거부한다(화면은 같은 함수로 경고만). 새 입력 경로도 같은 검사를 거친다. 감지 규칙을 넓힐 때는 "비밀번호 바꾸기" 같은 일반 메모가 막히지 않는지 `tests/privacy.test.ts`에 추가한다.
+- 음성은 `POST /api/transcribe`(Workers AI Whisper)로 텍스트만 돌려준다. 음성·변환 텍스트를 저장하지 않으며, 사용자가 검토한 뒤 `/api/memos`로 보낸다. 마이크 권한은 `public/_headers`의 `microphone=(self)`.
 - 순서·완료·삭제는 **모든 방문자에게 공유되는 편집**이다(소유 확인 없음, 2026-11-14 사용자 결정). 삭제는 기한 지난 미완료 메모만 숨김(`deleted_at`) 처리하고, 실제 DELETE SQL은 쓰지 않는다. 메모를 읽는 모든 쿼리에 `deleted_at IS NULL`을 넣는다.
 - 에이전트 이름을 바꾸면 Durable Object 클래스명이 바뀐다. `wrangler.jsonc` migrations에 새 태그를 추가하고(`renamed_classes` 등) 기존 항목은 수정하지 않는다. `wrangler.jsonc`를 수정했다면 `npm run cf-typegen`을 다시 실행한다.
 

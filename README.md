@@ -1,10 +1,12 @@
-# Memo Assistant
+# 메모비서 (Memo Assistant)
 
-> AX School **Build Your Agent** 과제 — 여러 생각을 한 번에 적으면 AI 에이전트가 메모로 나눠 정리하고 공유하는 **공개 체험 프로토타입**
+> AX School **Build Your Agent** 과제 — 떠오른 생각을 **글이나 음성**으로 한 번에 던지면 AI 에이전트가 메모로 나눠 정리하고 공유하는 **공개 체험 프로토타입**. 핵심은 할 일 관리보다 **기록의 진입장벽을 낮추는 것**입니다.
 
-**데모: https://memo-assistant.ggyaal.workers.dev**
+**데모: https://memo-assistant.ggyaal.workers.dev** (로그인 없이 사용) · 소개 글 초안: [docs/AX_CHALLENGE_SUBMISSION.md](docs/AX_CHALLENGE_SUBMISSION.md)
 
-> ⚠️ **모든 메모와 닉네임은 모든 방문자에게 공개됩니다.** 개인정보나 비밀 내용을 입력하지 마세요. 닉네임은 표시용이며 로그인이나 본인 확인이 아닙니다.
+![음성 입력 화면](docs/screenshots/01-voice-input.png)
+
+> ⚠️ **모든 메모와 닉네임은 모든 방문자에게 공개됩니다.** 개인정보나 비밀 내용을 입력하지 마세요. 닉네임은 표시용이며 로그인이나 본인 확인이 아닙니다. '익명'이어도 입력 내용 자체는 그대로 공개됩니다. 전화번호·이메일·주민번호·카드번호·'비밀번호: …' 같은 형식은 자동으로 막지만, 이름·주소 같은 다른 개인정보까지 모두 걸러내지는 못합니다.
 
 ## 누구를 위한 에이전트인가 / 무엇을 대신하나
 - **대상**: 떠오르는 할 일·약속·아이디어를 한 문장에 몰아 적는 사람(학생, 직장인, 팀 프로젝트 참여자).
@@ -15,7 +17,9 @@
 
 | 기능 | 상태 |
 |---|---|
-| 닉네임 입력, 공개 고지, 개인정보 입력 금지 안내 | 구현 (빌드 확인, 브라우저 수동 확인 전) |
+| 닉네임 입력, 공개 고지, 개인정보 입력 금지 안내 | 확인됨 (운영 브라우저) |
+| **음성 입력**: 버튼으로 녹음 시작/종료(최대 60초) → Workers AI Whisper로 글 변환 → 입력창에서 확인·수정 후 정리. 음성 파일은 저장하지 않음 | 확인됨 (운영: Chrome webm, 로컬: Safari 계열 mp4·wav 변환). 권한 거부·미지원 브라우저 안내 포함 |
+| **민감정보 차단**: 전화번호·이메일·주민번호·카드번호·비밀번호 값 감지 시 화면 경고 + 서버가 AI 호출 전 거부 | 확인됨 (테스트 + 운영) |
 | 하나의 입력을 여러 메모로 분리·분류하고 Flue Tool(`save_memos`)로 D1에 저장 | 확인됨 — mock 모델 테스트 + **실제 Workers AI(glm-4.7-flash) 로컬 호출** |
 | 원문 보존, 각 메모의 `source_id` 연결 | 확인됨 |
 | "내일 오후 3시"를 요청 시점 KST 기준으로 해석, 시각이 없는 표현("오늘")이나 기한 없는 메모에 일시를 만들지 않음 | 확인됨 (실제 AI + 서버 측 보정) |
@@ -32,7 +36,8 @@
 | 실제 모델의 분류·우선순위 일관성 | 실행마다 카테고리·알림 추천·우선순위가 달라질 수 있음 (Phase 2에서 측정) |
 | Cloudflare 배포 (Workers 무료 플랜) | 확인됨 — https://memo-assistant.ggyaal.workers.dev 에서 실제 AI 요청까지 확인 |
 | 👍/👎 평가, 작성자 필터 UI | 아직 안 됨 |
-| 실제 알림 발송, 음성 입력, 로그인, 개인 메모, 수정·삭제, 검색 | **이번 범위 아님(구현하지 않음)**. 알림은 "추천" 배지만 표시합니다. |
+| 실제 알림 발송, 로그인, 개인 메모, 메모 내용 수정, 검색 | **이번 범위 아님(구현하지 않음)**. 알림은 "추천" 배지만 표시합니다. |
+| 모델이 시각을 빠뜨린 경우 고치기 | 안 됨 — 예: "내일 아침 9시"가 "시간 미정"으로 저장된 사례(운영). 수정 기능 없음 |
 
 ## 구조
 ```text
@@ -49,7 +54,10 @@ Flue 에이전트 MemoOrganizer (Durable Object, src/agents/memo-organizer.ts)
   └─ Tool 호출 save_memos (src/tools/save-memos.ts)
         └─ sanitizeMemo() 보정 → D1 batch: sources 1건 + memos N건
   ▼
-D1 → 응답 → 결과 카드 / "오늘 등록된 메모" · "전체 공개 메모"
+D1 → 응답 → 결과 카드 / "오늘 등록된 메모" · "전체 공개 메모" · 사이드 패널(알림·우선순위·지나버린 일)
+
+🎙️ MediaRecorder ─ POST /api/transcribe (audio/*) ─▶ Workers AI @cf/openai/whisper-large-v3-turbo
+                                                     └▶ 텍스트만 응답(음성·텍스트 저장 안 함) → 입력창
 ```
 - 에이전트는 HTTP로 직접 노출하지 않습니다. `/api/memos`만 거치므로 검증과 요청 제한을 우회할 수 없습니다.
 - 모델은 닉네임, `source_id`, 생성 시각 같은 값을 정하거나 바꿀 수 없습니다.
@@ -81,10 +89,18 @@ npm run test:worker   # 빌드한 Worker를 workerd + 로컬 D1에서 실행 (AI
 ```
 테스트는 실제 AI를 호출하지 않습니다. 에이전트 테스트는 Pi faux provider로 모델 응답을 스크립트로 정해 두고, 실제 Flue 런타임과 Tool, 로컬 D1을 그대로 실행합니다.
 
-## 설정
-`wrangler.jsonc`의 `vars`로 조정합니다.
+## 설정 (환경 변수 이름만 — 비밀값 없음)
+`wrangler.jsonc`의 `vars`로 조정합니다. 비밀값(secret)은 필요하지 않습니다.
 - `MEMO_MODEL`: 무료 플랜에서 쓸 수 있고 function calling을 지원하는 Workers AI 모델
-- `RATE_LIMIT_PER_MINUTE`, `DAILY_AI_LIMIT`: 요청 제한 값
+- `RATE_LIMIT_PER_MINUTE`, `DAILY_AI_LIMIT`: AI 정리 요청 제한 값
+- 바인딩: `AI`(Workers AI), `DB`(D1). Flue가 Durable Object 바인딩을 자동 생성합니다.
+
+## 무료 서비스 의존성과 사용 제한
+| 항목 | 한도 | 앱의 대응 |
+|---|---|---|
+| Workers AI | 하루 10,000 Neurons (00:00 UTC = 오전 9시 KST 초기화) | AI 정리 하루 150회(1건 약 36 Neurons 실측), 음성 변환 하루 60회(1분 약 47 Neurons), 클라이언트별 분당 제한. 초과 시 안내 |
+| Workers / Durable Objects / D1 | 무료 플랜 한도 | 운영에서 호출당 CPU 10ms를 넘는 경우가 관찰됐지만 오류는 없었음([PROGRESS](docs/PROGRESS.md) R5) |
+| 음성 변환 | 최대 60초, 2MB | 녹음 자동 종료, 서버에서 크기 검사 |
 
 ## 보안·공개 저장소 주의
 - API 키, 토큰, `.env`, `.dev.vars`, `.wrangler/`(로컬 DB)는 `.gitignore`에 포함되어 있으며 **커밋하지 않습니다.** 이 앱은 Workers AI 바인딩을 쓰므로 별도 API 키가 필요하지 않습니다.
@@ -101,6 +117,8 @@ npm run test:worker   # 빌드한 Worker를 workerd + 로컬 D1에서 실행 (AI
 - 포크해서 다른 계정에 배포할 때는 `npx wrangler d1 create memo-assistant`로 만든 ID를 `wrangler.jsonc`의 `database_id`에 넣으세요.
 
 ## 문서
+- [docs/AX_CHALLENGE_SUBMISSION.md](docs/AX_CHALLENGE_SUBMISSION.md): 사이드 프로젝트 소개 글 초안(운영 실측 예시)
+- [docs/AX_CHALLENGE_DEMO.md](docs/AX_CHALLENGE_DEMO.md): 데모 녹화 순서·테스트 입력·캡처 가이드
 - [docs/SPEC.md](docs/SPEC.md): 제품 명세
 - [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md): 구현 지시
 - [docs/PROGRESS.md](docs/PROGRESS.md): 진행 기록, 이슈, 검증 결과

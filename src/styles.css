@@ -544,3 +544,73 @@ button:disabled {
 .nowrap {
 	white-space: nowrap;
 }
+
+.warning {
+	margin: 0;
+	padding: 8px 10px;
+	border-radius: 8px;
+	background: var(--notice-bg);
+	border: 1px solid var(--notice-border);
+	font-size: 0.9rem;
+}
+
+/* Voice input */
+.voice {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+.voice__button {
+	align-self: flex-start;
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	background: var(--bg);
+	color: var(--text);
+	border: 1px solid var(--border);
+	border-radius: 999px;
+	padding: 8px 14px;
+	font-weight: 600;
+}
+.voice__button.is-recording {
+	border-color: var(--error);
+	color: var(--error);
+}
+.voice__dot {
+	width: 10px;
+	height: 10px;
+	border-radius: 999px;
+	background: var(--error);
+	animation: voice-pulse 1s ease-in-out infinite;
+}
+@keyframes voice-pulse {
+	50% {
+		opacity: 0.3;
+	}
+}
+@media (prefers-reduced-motion: reduce) {
+	.voice__dot {
+		animation: none;
+	}
+}
+.voice__intro {
+	background: var(--bg);
+	border: 1px solid var(--border);
+	border-radius: 10px;
+	padding: 10px 12px;
+	font-size: 0.9rem;
+}
+.voice__intro p,
+.voice__intro ul {
+	margin: 0 0 6px;
+}
+.voice__intro ul {
+	padding-left: 18px;
+}
+.primary.small {
+	padding: 8px 12px;
+	font-size: 0.9rem;
+}
+.voice__note {
+	margin: 0;
+}

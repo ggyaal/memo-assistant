@@ -88,6 +88,13 @@ describe('built Worker (workerd + local D1 + Flue Durable Object)', () => {
 		expect(plain.status).toBe(415);
 	});
 
+	it('voice endpoint validates input in the built Worker', async () => {
+		const plain = await mf.dispatchFetch('http://localhost/api/transcribe', { method: 'POST', headers: { 'content-type': 'text/plain' }, body: 'x' });
+		expect(plain.status).toBe(415);
+		const tiny = await mf.dispatchFetch('http://localhost/api/transcribe', { method: 'POST', headers: { 'content-type': 'audio/webm' }, body: new Uint8Array(10) });
+		expect(tiny.status).toBe(422);
+	});
+
 	it('serves the agenda', async () => {
 		const res = await mf.dispatchFetch('http://localhost/api/agenda');
 		expect(res.status).toBe(200);

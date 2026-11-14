@@ -91,6 +91,7 @@ export interface UsageResponse {
 
 export type ApiErrorCode =
 	| 'invalid_request'
+	| 'sensitive_info'
 	| 'forbidden_origin'
 	| 'payload_too_large'
 	| 'rate_limited'
@@ -100,6 +101,9 @@ export type ApiErrorCode =
 	| 'agent_failed'
 	| 'not_saved'
 	| 'not_found'
+	| 'empty_audio'
+	| 'empty_transcript'
+	| 'transcribe_failed'
 	| 'conflict'
 	| 'db_error';
 

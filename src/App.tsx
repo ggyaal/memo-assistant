@@ -4,6 +4,7 @@ import { MemoCard } from './components/MemoCard.tsx';
 import { MemoInput } from './components/MemoInput.tsx';
 import { MemoList } from './components/MemoList.tsx';
 import { UsageMeter } from './components/UsageMeter.tsx';
+import { describeSensitive, detectSensitive } from './shared/privacy.ts';
 import { LIMITS, type CreateMemosResponse } from './shared/types.ts';
 
 const NICKNAME_KEY = 'memo-assistant:nickname';
@@ -28,7 +29,7 @@ export function App() {
 	function saveNickname(event: FormEvent) {
 		event.preventDefault();
 		const value = draft.trim().slice(0, LIMITS.nicknameMax);
-		if (!value) return;
+		if (!value || detectSensitive(value).length > 0) return;
 		setNickname(value);
 		try {
 			localStorage.setItem(NICKNAME_KEY, value);
@@ -85,7 +86,12 @@ export function App() {
 						placeholder={`최대 ${LIMITS.nicknameMax}자, 실명 대신 별명 권장`}
 						autoComplete="off"
 					/>
-					<button type="submit" className="primary" disabled={!draft.trim()}>
+					{detectSensitive(draft).length > 0 && (
+						<p className="warning" role="alert">
+							⚠️ 닉네임에 {describeSensitive(detectSensitive(draft))}를 쓰지 마세요. 닉네임도 모두에게 공개됩니다.
+						</p>
+					)}
+					<button type="submit" className="primary" disabled={!draft.trim() || detectSensitive(draft).length > 0}>
 						시작하기
 					</button>
 				</form>

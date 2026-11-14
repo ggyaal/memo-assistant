@@ -158,6 +158,29 @@ describe('POST /api/memos', () => {
 		expect(res.headers.get('access-control-allow-origin')).toBeNull();
 	});
 
+	it.each([
+		['phone', '내일 010-1234-5678로 전화하기', '전화번호'],
+		['secret', '와이파이 비밀번호: qwer1234 메모', '비밀번호'],
+		['email in nickname', '회의 준비', '이메일'],
+	])('refuses sensitive data (%s) before the AI and stores nothing', async (label, text, word) => {
+		const runner = toolRunner(db);
+		const nickname = label === 'email in nickname' ? 'me@example.com' : '테스터';
+		const res = await makeApp(runner).request('/api/memos', { method: 'POST', body: body(text, undefined, nickname) });
+		expect(res.status).toBe(400);
+		const json = (await res.json()) as { error: string; message: string };
+		expect(json.error).toBe('sensitive_info');
+		expect(json.message).toContain(word);
+		expect(json.message).not.toContain('5678'); // never echoes the value
+		expect(runner.calls).toHaveLength(0);
+		expect((await db.prepare('SELECT COUNT(*) AS n FROM sources').first<{ n: number }>())?.n).toBe(0);
+		expect((await (await makeApp(runner).request('/api/usage')).json() as { total: number }).total).toBe(0);
+	});
+
+	it('still accepts ordinary memos that mention passwords as a task', async () => {
+		const res = await makeApp(toolRunner(db)).request('/api/memos', { method: 'POST', body: body('오늘 장 보고 비밀번호 바꾸기') });
+		expect(res.status).toBe(201);
+	});
+
 	it('rate limits per client per minute (server side)', async () => {
 		const runner = toolRunner(db);
 		const app = makeApp(runner, { RATE_LIMIT_PER_MINUTE: '2', DAILY_AI_LIMIT: '100' });
@@ -461,6 +484,68 @@ describe('지나버린 일 (feature 3: overdue list + delete)', () => {
 		expect((await del(app, '00000000-0000-4000-8000-0000000000ff')).status).toBe(404);
 		expect((await del(app, shopping, { origin: 'https://evil.example' })).status).toBe(403);
 		expect(await overdueTitles(app)).toEqual(['장보기']);
+	});
+});
+
+describe('POST /api/transcribe (voice → text)', () => {
+	const AUDIO = new Uint8Array(4096).fill(7);
+	function voiceApp(transcribe: (ai: Ai, audio: Uint8Array, type: string) => Promise<string>) {
+		const app = new Hono<{ Bindings: ApiBindings }>();
+		app.route('/api', createApi({ runAgent: async () => {}, transcribe, now: () => clock }));
+		return (audio: Uint8Array | string, headers: Record<string, string> = {}, ip = '203.0.113.5') =>
+			app.request(
+				'/api/transcribe',
+				{ method: 'POST', body: audio, headers: { 'content-type': 'audio/webm;codecs=opus', 'cf-connecting-ip': ip, ...headers } },
+				{ DB: db, AI: {} as Ai },
+			);
+	}
+
+	it('returns the transcript and passes the audio through untouched', async () => {
+		let seen: { bytes: number; type: string } | null = null;
+		const send = voiceApp(async (_ai, audio, type) => {
+			seen = { bytes: audio.byteLength, type };
+			return '  내일 오후 3시에 팀 회의 준비하기 ';
+		});
+		const res = await send(AUDIO);
+		expect(res.status).toBe(200);
+		expect(await res.json()).toEqual({ text: '내일 오후 3시에 팀 회의 준비하기' });
+		expect(seen).toEqual({ bytes: 4096, type: 'audio/webm;codecs=opus' });
+		// Nothing is stored.
+		expect((await db.prepare('SELECT COUNT(*) AS n FROM sources').first<{ n: number }>())?.n).toBe(0);
+	});
+
+	it.each([
+		['non-audio content type', AUDIO, { 'content-type': 'application/json' }, 415, 'invalid_request'],
+		['foreign origin', AUDIO, { origin: 'https://evil.example' }, 403, 'forbidden_origin'],
+		['empty recording', new Uint8Array(100), {}, 422, 'empty_audio'],
+		['too large', new Uint8Array(2 * 1024 * 1024 + 1), {}, 413, 'payload_too_large'],
+	])('rejects %s before calling the model', async (_label, audio, headers, status, code) => {
+		let called = false;
+		const res = await voiceApp(async () => {
+			called = true;
+			return 'x';
+		})(audio, headers);
+		expect(res.status).toBe(status);
+		expect(((await res.json()) as { error: string }).error).toBe(code);
+		expect(called).toBe(false);
+	});
+
+	it.each([
+		['silence', async () => '', 422, 'empty_transcript'],
+		['model failure', async () => { throw new Error('boom'); }, 502, 'transcribe_failed'],
+		['free quota used up', async () => { throw new Error('4006: daily free allocation of 10,000 neurons'); }, 503, 'ai_quota_exceeded'],
+	])('reports %s', async (_label, transcribe, status, code) => {
+		const res = await voiceApp(transcribe)(AUDIO);
+		expect(res.status).toBe(status);
+		expect(((await res.json()) as { error: string }).error).toBe(code);
+	});
+
+	it('limits each client to 6 conversions per minute', async () => {
+		const send = voiceApp(async () => '메모');
+		const statuses: number[] = [];
+		for (let i = 0; i < 7; i++) statuses.push((await send(AUDIO)).status);
+		expect(statuses).toEqual([200, 200, 200, 200, 200, 200, 429]);
+		expect((await send(AUDIO, {}, '198.51.100.20')).status).toBe(200); // another client
 	});
 });
 

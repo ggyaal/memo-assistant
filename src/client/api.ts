@@ -86,3 +86,12 @@ export function setMemoCompleted(id: string, completed: boolean): Promise<{ memo
 export function deleteMemo(id: string): Promise<{ deleted: string }> {
 	return request(`/api/memos/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
+
+/** Speech → text. The audio is not stored; the text comes back for review. */
+export function transcribeAudio(audio: Blob): Promise<{ text: string }> {
+	return request('/api/transcribe', {
+		method: 'POST',
+		headers: { 'content-type': audio.type || 'audio/webm' },
+		body: audio,
+	});
+}
