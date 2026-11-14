@@ -62,14 +62,23 @@ export function VoiceRecorder({
 	const stream = useRef<MediaStream | null>(null);
 	const chunks = useRef<Blob[]>([]);
 	const timer = useRef<number | null>(null);
+	const watchdog = useRef<number | null>(null);
+	const finished = useRef(false);
 	const canRecord = supported();
 
 	useEffect(() => onBusyChange(phase !== 'idle' && phase !== 'intro'), [phase, onBusyChange]);
-	useEffect(() => () => cleanup(), []);
+	useEffect(() => () => releaseMic(), []);
 
-	function cleanup() {
+	function clearTimers() {
 		if (timer.current !== null) window.clearInterval(timer.current);
+		if (watchdog.current !== null) window.clearTimeout(watchdog.current);
 		timer.current = null;
+		watchdog.current = null;
+	}
+
+	/** Stop the microphone. Called only after the recorder has delivered its data. */
+	function releaseMic() {
+		clearTimers();
 		stream.current?.getTracks().forEach((t) => t.stop());
 		stream.current = null;
 	}
@@ -80,18 +89,28 @@ export function VoiceRecorder({
 		try {
 			stream.current = await navigator.mediaDevices.getUserMedia({ audio: true });
 		} catch (error) {
-			cleanup();
+			releaseMic();
 			setPhase('idle');
 			setMessage({ text: micErrorMessage(error), error: true });
 			return;
 		}
-		chunks.current = [];
-		const mimeType = pickMimeType();
-		const rec = new MediaRecorder(stream.current, mimeType ? { mimeType } : undefined);
-		rec.ondataavailable = (e) => e.data.size > 0 && chunks.current.push(e.data);
-		rec.onstop = () => void finish(rec.mimeType);
-		recorder.current = rec;
-		rec.start();
+		try {
+			chunks.current = [];
+			finished.current = false;
+			const mimeType = pickMimeType();
+			const rec = new MediaRecorder(stream.current, mimeType ? { mimeType } : undefined);
+			rec.ondataavailable = (e) => e.data.size > 0 && chunks.current.push(e.data);
+			rec.onstop = () => void finish(rec.mimeType || mimeType || '');
+			rec.onerror = () => void finish(rec.mimeType || mimeType || '');
+			recorder.current = rec;
+			// Deliver data every second, so a lost final chunk/stop event cannot lose the whole recording.
+			rec.start(1000);
+		} catch {
+			releaseMic();
+			setPhase('idle');
+			setMessage({ text: '이 브라우저에서 녹음을 시작하지 못했어요. 텍스트로 입력해 주세요.', error: true });
+			return;
+		}
 		setSeconds(0);
 		setPhase('recording');
 		const startedAt = Date.now();
@@ -103,20 +122,42 @@ export function VoiceRecorder({
 	}
 
 	function stop() {
-		if (recorder.current?.state === 'recording') recorder.current.stop();
-		cleanup();
+		// Show progress immediately; the upload starts when the recorder reports "stop".
+		setPhase('transcribing');
+		if (timer.current !== null) window.clearInterval(timer.current);
+		timer.current = null;
+		const rec = recorder.current;
+		const mimeType = rec?.mimeType ?? '';
+		try {
+			if (rec && rec.state !== 'inactive') {
+				rec.requestData();
+				rec.stop();
+			} else {
+				void finish(mimeType);
+				return;
+			}
+		} catch {
+			void finish(mimeType);
+			return;
+		}
+		// Some browsers occasionally never fire "stop"; finish with what we have.
+		watchdog.current = window.setTimeout(() => void finish(mimeType), 4000);
 	}
 
 	async function finish(mimeType: string) {
+		if (finished.current) return;
+		finished.current = true;
+		releaseMic();
 		const audio = new Blob(chunks.current, { type: mimeType || 'audio/webm' });
 		chunks.current = [];
 		recorder.current = null;
 		if (audio.size < MIN_BYTES) {
 			setPhase('idle');
-			setMessage({ text: '녹음이 너무 짧아요. 버튼을 누르고 말한 뒤 다시 눌러 주세요.', error: true });
+			setMessage({ text: '녹음된 소리가 거의 없어요. 마이크가 켜져 있는지 확인하고, 버튼을 누른 뒤 말하고 다시 눌러 주세요.', error: true });
 			return;
 		}
 		setPhase('transcribing');
+		setMessage({ text: '음성을 글로 바꾸는 중이에요… (몇 초 걸려요)', error: false });
 		try {
 			const { text } = await transcribeAudio(audio);
 			onTranscript(text);

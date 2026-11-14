@@ -24,7 +24,7 @@ import {
 import { clientKey, consumeAiQuota, consumeWindow, readUsage } from './rate-limit.ts';
 import { describeSensitive, detectSensitive } from '../shared/privacy.ts';
 import { kstDate, kstDayRangeUtc } from './time.ts';
-import { AUDIO_MAX_BYTES, AUDIO_MIN_BYTES, type Transcriber, whisperTranscriber } from './transcribe.ts';
+import { AUDIO_MAX_BYTES, AUDIO_MIN_BYTES, isLikelySilence, type Transcriber, whisperTranscriber } from './transcribe.ts';
 import {
 	CompleteRequestSchema,
 	CreateMemosRequestSchema,
@@ -244,11 +244,16 @@ export function createApi(deps: ApiDeps) {
 		}
 		if (!c.env.AI) return fail(c, 503, 'transcribe_failed', '음성 변환을 사용할 수 없습니다.');
 		try {
+			const startedAt = Date.now();
 			const text = (await transcribe(c.env.AI, audio, contentType)).trim().slice(0, LIMITS.textMax);
-			if (!text) return fail(c, 422, 'empty_transcript', '음성을 알아듣지 못했어요. 다시 녹음하거나 텍스트로 입력해 주세요.');
+			// Metadata only (no audio, no text) so failures can be diagnosed from `wrangler tail`.
+			console.log('transcribe', JSON.stringify({ bytes: audio.byteLength, type: contentType, chars: text.length, ms: Date.now() - startedAt }));
+			if (isLikelySilence(text)) {
+				return fail(c, 422, 'empty_transcript', '음성을 알아듣지 못했어요. 마이크 가까이에서 다시 녹음하거나 텍스트로 입력해 주세요.');
+			}
 			return c.json({ text });
 		} catch (error) {
-			console.error('transcribe failed', describeError(error));
+			console.error('transcribe failed', JSON.stringify({ bytes: audio.byteLength, type: contentType }), describeError(error));
 			const classified = classifyAgentError(error);
 			if (classified.code === 'ai_quota_exceeded') return fail(c, 503, classified.code, classified.message);
 			return fail(c, 502, 'transcribe_failed', '음성을 텍스트로 바꾸지 못했어요. 다시 녹음하거나 텍스트로 입력해 주세요.');

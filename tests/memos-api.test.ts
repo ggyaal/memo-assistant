@@ -532,6 +532,8 @@ describe('POST /api/transcribe (voice → text)', () => {
 
 	it.each([
 		['silence', async () => '', 422, 'empty_transcript'],
+		['silence hallucinated as credits', async () => '시청해 주셔서 감사합니다.', 422, 'empty_transcript'],
+		['silence hallucinated as thanks', async () => '감사합니다.', 422, 'empty_transcript'],
 		['model failure', async () => { throw new Error('boom'); }, 502, 'transcribe_failed'],
 		['free quota used up', async () => { throw new Error('4006: daily free allocation of 10,000 neurons'); }, 503, 'ai_quota_exceeded'],
 	])('reports %s', async (_label, transcribe, status, code) => {

@@ -26,3 +26,24 @@ export const whisperTranscriber: Transcriber = async (ai, audio) => {
 	})) as { text?: string };
 	return (result.text ?? '').trim();
 };
+
+// Whisper's well-known outputs for silence/noise (subtitle credits etc.).
+// A transcript that is *only* one of these is treated as "nothing heard".
+const SILENCE_HALLUCINATIONS = [
+	'감사합니다',
+	'고맙습니다',
+	'시청해주셔서감사합니다',
+	'시청해주셔서고맙습니다',
+	'구독과좋아요부탁드립니다',
+	'구독과좋아요알림설정부탁드립니다',
+	'다음영상에서만나요',
+	'mbc뉴스이덕영입니다',
+	'thankyou',
+	'thanksforwatching',
+	'you',
+];
+
+export function isLikelySilence(text: string): boolean {
+	const normalized = text.toLowerCase().replace(/[\s.,!?~…"'·-]/g, '');
+	return normalized === '' || SILENCE_HALLUCINATIONS.includes(normalized);
+}
