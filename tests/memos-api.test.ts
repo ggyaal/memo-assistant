@@ -489,7 +489,9 @@ describe('지나버린 일 (feature 3: overdue list + delete)', () => {
 
 describe('POST /api/transcribe (voice → text)', () => {
 	const AUDIO = new Uint8Array(4096).fill(7);
-	function voiceApp(transcribe: (ai: Ai, audio: Uint8Array, type: string) => Promise<string>) {
+	type T = (ai: Ai, audio: Uint8Array, type: string) => Promise<{ text: string; seconds: number | null }>;
+	const said = (text: string, seconds: number | null = 5): T => async () => ({ text, seconds });
+	function voiceApp(transcribe: T) {
 		const app = new Hono<{ Bindings: ApiBindings }>();
 		app.route('/api', createApi({ runAgent: async () => {}, transcribe, now: () => clock }));
 		return (audio: Uint8Array | string, headers: Record<string, string> = {}, ip = '203.0.113.5') =>
@@ -499,17 +501,20 @@ describe('POST /api/transcribe (voice → text)', () => {
 				{ DB: db, AI: {} as Ai },
 			);
 	}
+	const voiceUsed = async () =>
+		((await (await makeApp(toolRunner(db)).request('/api/usage')).json()) as { voice: { usedSeconds: number; limitSeconds: number } }).voice;
 
-	it('returns the transcript and passes the audio through untouched', async () => {
+	it('returns the transcript, passes the audio through untouched, and counts its seconds', async () => {
 		let seen: { bytes: number; type: string } | null = null;
 		const send = voiceApp(async (_ai, audio, type) => {
 			seen = { bytes: audio.byteLength, type };
-			return '  내일 오후 3시에 팀 회의 준비하기 ';
+			return { text: '  내일 오후 3시에 팀 회의 준비하기 ', seconds: 4.2 };
 		});
 		const res = await send(AUDIO);
 		expect(res.status).toBe(200);
 		expect(await res.json()).toEqual({ text: '내일 오후 3시에 팀 회의 준비하기' });
 		expect(seen).toEqual({ bytes: 4096, type: 'audio/webm;codecs=opus' });
+		expect(await voiceUsed()).toEqual({ usedSeconds: 5, limitSeconds: 1800 }); // 4.2 s rounded up
 		// Nothing is stored.
 		expect((await db.prepare('SELECT COUNT(*) AS n FROM sources').first<{ n: number }>())?.n).toBe(0);
 	});
@@ -518,12 +523,12 @@ describe('POST /api/transcribe (voice → text)', () => {
 		['non-audio content type', AUDIO, { 'content-type': 'application/json' }, 415, 'invalid_request'],
 		['foreign origin', AUDIO, { origin: 'https://evil.example' }, 403, 'forbidden_origin'],
 		['empty recording', new Uint8Array(100), {}, 422, 'empty_audio'],
-		['too large', new Uint8Array(2 * 1024 * 1024 + 1), {}, 413, 'payload_too_large'],
+		['over 600 KB', new Uint8Array(600 * 1024 + 1), {}, 413, 'payload_too_large'],
 	])('rejects %s before calling the model', async (_label, audio, headers, status, code) => {
 		let called = false;
 		const res = await voiceApp(async () => {
 			called = true;
-			return 'x';
+			return { text: 'x', seconds: 1 };
 		})(audio, headers);
 		expect(res.status).toBe(status);
 		expect(((await res.json()) as { error: string }).error).toBe(code);
@@ -531,19 +536,44 @@ describe('POST /api/transcribe (voice → text)', () => {
 	});
 
 	it.each([
-		['silence', async () => '', 422, 'empty_transcript'],
-		['silence hallucinated as credits', async () => '시청해 주셔서 감사합니다.', 422, 'empty_transcript'],
-		['silence hallucinated as thanks', async () => '감사합니다.', 422, 'empty_transcript'],
+		['silence', said(''), 422, 'empty_transcript'],
+		['silence hallucinated as credits', said('시청해 주셔서 감사합니다.'), 422, 'empty_transcript'],
+		['silence hallucinated as thanks', said('감사합니다.'), 422, 'empty_transcript'],
 		['model failure', async () => { throw new Error('boom'); }, 502, 'transcribe_failed'],
 		['free quota used up', async () => { throw new Error('4006: daily free allocation of 10,000 neurons'); }, 503, 'ai_quota_exceeded'],
-	])('reports %s', async (_label, transcribe, status, code) => {
-		const res = await voiceApp(transcribe)(AUDIO);
+	] as const)('reports %s', async (_label, transcribe, status, code) => {
+		const res = await voiceApp(transcribe as T)(AUDIO);
 		expect(res.status).toBe(status);
 		expect(((await res.json()) as { error: string }).error).toBe(code);
 	});
 
+	it('refuses audio longer than 65 s by its real duration, but still counts it', async () => {
+		const res = await voiceApp(said('아주 긴 녹음', 600))(AUDIO); // e.g. a crafted low-bitrate upload
+		expect(res.status).toBe(413);
+		expect((await voiceUsed()).usedSeconds).toBe(600);
+	});
+
+	it('estimates seconds from size when the model reports none (32 kbps ≈ 4 KB/s)', async () => {
+		await voiceApp(said('메모', null))(new Uint8Array(40_000));
+		expect((await voiceUsed()).usedSeconds).toBe(10);
+	});
+
+	it('stops at the 30-minute daily voice budget (shared by everyone) until 09:00 KST', async () => {
+		const send = voiceApp(said('긴 메모', 60));
+		for (let i = 0; i < 30; i++) {
+			// different clients so the per-minute limit does not interfere
+			expect((await send(AUDIO, {}, `198.51.100.${i}`)).status).toBe(200);
+		}
+		const blocked = await send(AUDIO, {}, '198.51.100.200');
+		expect(blocked.status).toBe(429);
+		expect(((await blocked.json()) as { error: string }).error).toBe('daily_limit_reached');
+		expect(await voiceUsed()).toEqual({ usedSeconds: 1800, limitSeconds: 1800 });
+		clock = new Date('2026-11-10T00:00:01Z'); // next UTC day = 09:00 KST
+		expect((await send(AUDIO, {}, '198.51.100.201')).status).toBe(200);
+	});
+
 	it('limits each client to 6 conversions per minute', async () => {
-		const send = voiceApp(async () => '메모');
+		const send = voiceApp(said('메모'));
 		const statuses: number[] = [];
 		for (let i = 0; i < 7; i++) statuses.push((await send(AUDIO)).status);
 		expect(statuses).toEqual([200, 200, 200, 200, 200, 200, 429]);
@@ -552,7 +582,7 @@ describe('POST /api/transcribe (voice → text)', () => {
 });
 
 describe('GET /api/usage', () => {
-	type Usage = { today: { used: number; limit: number; resetsAt: string }; total: number };
+	type Usage = { today: { used: number; limit: number; resetsAt: string; neurons: number; neuronBudget: number }; total: number };
 	const usage = async (app: ReturnType<typeof makeApp>) => (await (await app.request('/api/usage')).json()) as Usage;
 
 	it('starts at zero with the configured limit and next 00:00 UTC reset', async () => {
@@ -561,8 +591,9 @@ describe('GET /api/usage', () => {
 		expect(res.status).toBe(200);
 		expect(res.headers.get('cache-control')).toBe('no-store');
 		expect(await res.json()).toEqual({
-			today: { used: 0, limit: 150, resetsAt: '2026-11-10T00:00:00.000Z' }, // = 09:00 KST
+			today: { used: 0, limit: 150, resetsAt: '2026-11-10T00:00:00.000Z', neurons: 0, neuronBudget: 6000 }, // = 09:00 KST
 			total: 0,
+			voice: { usedSeconds: 0, limitSeconds: 1800 },
 		});
 	});
 
@@ -584,6 +615,25 @@ describe('GET /api/usage', () => {
 		for (let i = 0; i < 4; i++) statuses.push((await app.request('/api/memos', { method: 'POST', body: body() })).status);
 		expect(statuses).toEqual([201, 201, 429, 429]);
 		expect(await usage(app)).toMatchObject({ today: { used: 2, limit: 2 }, total: 2 });
+	});
+
+	it('charges the estimated cost of each input to the daily Neuron budget (30 + 0.4 × chars)', async () => {
+		const app = makeApp(toolRunner(db), { RATE_LIMIT_PER_MINUTE: '100' });
+		await app.request('/api/memos', { method: 'POST', body: body(RAW) }); // 52 chars → 51
+		expect((await usage(app)).today).toMatchObject({ used: 1, neurons: 51, neuronBudget: 6000 });
+	});
+
+	it('stops long inputs by cost before the request count runs out', async () => {
+		const app = makeApp(toolRunner(db), { RATE_LIMIT_PER_MINUTE: '100', DAILY_AI_LIMIT: '150', DAILY_AI_NEURONS: '1000' });
+		const long = `${RAW}${'할일메모정리'.repeat(200)}`.slice(0, 1000); // exactly 1000 chars → 430
+		expect(long.length).toBe(1000);
+		const statuses: number[] = [];
+		for (let i = 0; i < 3; i++) statuses.push((await app.request('/api/memos', { method: 'POST', body: body(long) })).status);
+		expect(statuses).toEqual([201, 201, 429]); // 430 + 430 = 860; a third would exceed 1000
+		const u = await usage(app);
+		expect(u.today).toMatchObject({ used: 2, neurons: 860 }); // the denied request cost nothing
+		// A short input still fits in the remaining budget.
+		expect((await app.request('/api/memos', { method: 'POST', body: body('내일 우유') })).status).toBe(201);
 	});
 
 	it('also counts AI attempts that fail', async () => {

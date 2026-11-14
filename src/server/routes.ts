@@ -21,10 +21,26 @@ import {
 	saveManualOrder,
 	setCompleted,
 } from './db.ts';
-import { clientKey, consumeAiQuota, consumeWindow, readUsage } from './rate-limit.ts';
+import {
+	addVoiceSeconds,
+	clientKey,
+	consumeAiQuota,
+	consumeWindow,
+	estimateMemoNeurons,
+	readUsage,
+	voiceSecondsUsed,
+} from './rate-limit.ts';
 import { describeSensitive, detectSensitive } from '../shared/privacy.ts';
 import { kstDate, kstDayRangeUtc } from './time.ts';
-import { AUDIO_MAX_BYTES, AUDIO_MIN_BYTES, isLikelySilence, type Transcriber, whisperTranscriber } from './transcribe.ts';
+import {
+	AUDIO_MAX_BYTES,
+	AUDIO_MAX_SECONDS,
+	AUDIO_MIN_BYTES,
+	billableSeconds,
+	isLikelySilence,
+	type Transcriber,
+	whisperTranscriber,
+} from './transcribe.ts';
 import {
 	CompleteRequestSchema,
 	CreateMemosRequestSchema,
@@ -39,6 +55,7 @@ export interface ApiBindings {
 	AI?: Ai;
 	RATE_LIMIT_PER_MINUTE?: string;
 	DAILY_AI_LIMIT?: string;
+	DAILY_AI_NEURONS?: string;
 }
 
 export interface ApiDeps {
@@ -129,8 +146,8 @@ function crossSiteBlock(c: ApiContext, expectsJsonBody: boolean) {
 
 /** Voice: per client per minute, and for the whole app per UTC day (~47 Neurons/min each). */
 const VOICE_PER_MINUTE = 6;
-const VOICE_PER_DAY = 60;
-const DAY_MS = 86_400_000;
+/** Whole-app voice budget per UTC day: 30 audio minutes ≈ 1,400 Neurons. */
+export const VOICE_SECONDS_PER_DAY = 30 * 60;
 const AUDIO_TYPE = /^audio\/(webm|ogg|mp4|mpeg|mp3|wav|x-wav|wave|aac|x-m4a|m4a|flac)\b/i;
 
 /** Board edits (reorder/complete/delete) per client per minute. */
@@ -159,10 +176,17 @@ function dailyLimit(env: ApiBindings): number {
 	return toPositiveInt(env.DAILY_AI_LIMIT, 150);
 }
 
+/** Estimated Neurons per UTC day for memo organizing (voice has its own 30-minute budget). */
+function neuronBudget(env: ApiBindings): number {
+	return toPositiveInt(env.DAILY_AI_NEURONS, 6000);
+}
+
 export function createApi(deps: ApiDeps) {
 	const now = deps.now ?? (() => new Date());
 	const newId = deps.newId ?? (() => crypto.randomUUID());
-	const timeoutMs = deps.agentTimeoutMs ?? 90_000;
+	// Long inputs (10+ memos) took ~100 s in measurements; give the agent room so a
+	// run we already paid for is not thrown away at the deadline.
+	const timeoutMs = deps.agentTimeoutMs ?? 150_000;
 	const transcribe = deps.transcribe ?? whisperTranscriber;
 	const api = new Hono<{ Bindings: ApiBindings }>();
 
@@ -183,7 +207,7 @@ export function createApi(deps: ApiDeps) {
 
 	api.get('/usage', async (c) => {
 		try {
-			const usage = await readUsage(c.env.DB, dailyLimit(c.env), now());
+			const usage = await readUsage(c.env.DB, dailyLimit(c.env), now(), VOICE_SECONDS_PER_DAY, neuronBudget(c.env));
 			return c.json<UsageResponse>(usage);
 		} catch (error) {
 			console.error('read usage failed', describeError(error));
@@ -229,14 +253,12 @@ export function createApi(deps: ApiDeps) {
 		try {
 			const client = await clientKey(c.req.header('cf-connecting-ip'));
 			const perClient = await consumeWindow(c.env.DB, `voice:${client}`, VOICE_PER_MINUTE, 60_000, current);
-			const perDay = perClient.allowed
-				? await consumeWindow(c.env.DB, 'voice:global', VOICE_PER_DAY, DAY_MS, current)
-				: perClient;
-			if (!perDay.allowed) {
-				c.header('Retry-After', String(perDay.retryAfterSeconds));
-				return perClient.allowed
-					? fail(c, 429, 'daily_limit_reached', '오늘 음성 변환 한도에 도달했어요. 텍스트로 입력해 주세요.')
-					: fail(c, 429, 'rate_limited', '음성 변환 요청이 너무 잦습니다. 1분 후 다시 시도해 주세요.');
+			if (!perClient.allowed) {
+				c.header('Retry-After', String(perClient.retryAfterSeconds));
+				return fail(c, 429, 'rate_limited', '음성 변환 요청이 너무 잦습니다. 1분 후 다시 시도해 주세요.');
+			}
+			if ((await voiceSecondsUsed(c.env.DB, current)) >= VOICE_SECONDS_PER_DAY) {
+				return fail(c, 429, 'daily_limit_reached', '오늘 음성 변환 한도(30분)를 다 썼어요. 텍스트로 입력해 주세요.');
 			}
 		} catch (error) {
 			console.error('voice limit failed', describeError(error));
@@ -245,9 +267,16 @@ export function createApi(deps: ApiDeps) {
 		if (!c.env.AI) return fail(c, 503, 'transcribe_failed', '음성 변환을 사용할 수 없습니다.');
 		try {
 			const startedAt = Date.now();
-			const text = (await transcribe(c.env.AI, audio, contentType)).trim().slice(0, LIMITS.textMax);
+			const result = await transcribe(c.env.AI, audio, contentType);
+			const seconds = billableSeconds(result, audio.byteLength);
+			// Count what the model processed (and is billed) before deciding anything else.
+			await addVoiceSeconds(c.env.DB, seconds, current).catch((error) => console.error('voice seconds failed', describeError(error)));
+			const text = result.text.trim().slice(0, LIMITS.textMax);
 			// Metadata only (no audio, no text) so failures can be diagnosed from `wrangler tail`.
-			console.log('transcribe', JSON.stringify({ bytes: audio.byteLength, type: contentType, chars: text.length, ms: Date.now() - startedAt }));
+			console.log('transcribe', JSON.stringify({ bytes: audio.byteLength, type: contentType, seconds, chars: text.length, ms: Date.now() - startedAt }));
+			if (seconds > AUDIO_MAX_SECONDS) {
+				return fail(c, 413, 'payload_too_large', '녹음이 너무 깁니다. 1분 이내로 녹음해 주세요.');
+			}
 			if (isLikelySilence(text)) {
 				return fail(c, 422, 'empty_transcript', '음성을 알아듣지 못했어요. 마이크 가까이에서 다시 녹음하거나 텍스트로 입력해 주세요.');
 			}
@@ -390,8 +419,10 @@ export function createApi(deps: ApiDeps) {
 				{
 					perMinute: toPositiveInt(c.env.RATE_LIMIT_PER_MINUTE, 5),
 					perDay: dailyLimit(c.env),
+					neuronBudget: neuronBudget(c.env),
 				},
 				now(),
+				estimateMemoNeurons(input.text.length),
 			);
 			if (!decision.allowed) {
 				c.header('Retry-After', String(decision.retryAfterSeconds));

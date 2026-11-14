@@ -26,9 +26,11 @@ export function UsageMeter({ refreshKey }: { refreshKey: number }) {
 	}, [refreshKey]);
 
 	if (!usage) return null;
-	const { used, limit } = usage.today;
-	const ratio = limit > 0 ? Math.min(1, used / limit) : 1;
-	const full = used >= limit;
+	const { used, limit, neurons, neuronBudget } = usage.today;
+	// Whichever runs out first: the request count or the estimated free-AI budget.
+	const ratio = Math.min(1, Math.max(limit > 0 ? used / limit : 1, neuronBudget > 0 ? neurons / neuronBudget : 1));
+	const full = ratio >= 1;
+	const percent = Math.round(ratio * 100);
 
 	return (
 		<section className={full ? 'usage usage--full' : 'usage'} aria-label="AI 사용량">
@@ -39,11 +41,22 @@ export function UsageMeter({ refreshKey }: { refreshKey: number }) {
 						{number.format(used)} / {number.format(limit)}회
 					</strong>
 				</span>
-				<span className="muted">누적 {number.format(usage.total)}회</span>
+				<span className="muted">
+					무료 예산 {percent}% · 누적 {number.format(usage.total)}회
+				</span>
 			</div>
 			{/* Native <progress>: no inline styles, so the strict CSP (style-src 'self') holds. */}
-			<progress className="usage__bar" value={used} max={limit} aria-label="오늘 AI 사용량" />
-			<span className="sr-only">{Math.round(ratio * 100)}%</span>
+			<progress className="usage__bar" value={percent} max={100} aria-label="오늘 AI 사용량(무료 예산 기준)" />
+			<span className="sr-only">{percent}%</span>
+			<div className="row space-between small">
+				<span>
+					음성 변환{' '}
+					<strong>
+						{Math.floor(usage.voice.usedSeconds / 60)}분 {usage.voice.usedSeconds % 60}초 / {Math.round(usage.voice.limitSeconds / 60)}분
+					</strong>
+				</span>
+				{usage.voice.usedSeconds >= usage.voice.limitSeconds && <span className="error small">오늘 음성 한도 도달</span>}
+			</div>
 			<p className="muted small usage__note">
 				{full ? '오늘 데모의 AI 사용 한도에 도달했습니다. ' : ''}매일 오전 9시(한국 시간)에 초기화됩니다.
 			</p>

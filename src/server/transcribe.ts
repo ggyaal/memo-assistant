@@ -2,7 +2,11 @@
 // discarded; nothing is stored. Free plan: ~47 Neurons per audio minute.
 
 export const WHISPER_MODEL = '@cf/openai/whisper-large-v3-turbo';
-export const AUDIO_MAX_BYTES = 2 * 1024 * 1024; // ≈ 60 s of Opus/AAC with headroom
+// The page records at 32 kbps, so 60 s ≈ 240 KB. A tighter byte cap also bounds
+// how much audio a hand-crafted low-bitrate upload can carry (≈ 10 min at 8 kbps).
+export const AUDIO_MAX_BYTES = 600 * 1024;
+/** Longest accepted recording, by the model-reported duration (UI stops at 60 s). */
+export const AUDIO_MAX_SECONDS = 65;
 export const AUDIO_MIN_BYTES = 1024; // shorter than this is an empty recording
 
 /** Base64 in chunks (String.fromCharCode on a huge array overflows the stack). */
@@ -14,7 +18,13 @@ export function toBase64(bytes: Uint8Array): string {
 	return btoa(binary);
 }
 
-export type Transcriber = (ai: Ai, audio: Uint8Array, contentType: string) => Promise<string>;
+export interface Transcript {
+	text: string;
+	/** Audio length reported by the model (what Workers AI bills for); null if absent. */
+	seconds: number | null;
+}
+
+export type Transcriber = (ai: Ai, audio: Uint8Array, contentType: string) => Promise<Transcript>;
 
 export const whisperTranscriber: Transcriber = async (ai, audio) => {
 	const result = (await ai.run(WHISPER_MODEL, {
@@ -23,9 +33,15 @@ export const whisperTranscriber: Transcriber = async (ai, audio) => {
 		language: 'ko',
 		vad_filter: true, // skip silence; fewer hallucinated words on quiet audio
 		condition_on_previous_text: false,
-	})) as { text?: string };
-	return (result.text ?? '').trim();
+	})) as { text?: string; transcription_info?: { duration?: number } };
+	const seconds = result.transcription_info?.duration;
+	return { text: (result.text ?? '').trim(), seconds: typeof seconds === 'number' && Number.isFinite(seconds) ? seconds : null };
 };
+
+/** Billable seconds: the model's duration, else an estimate from size at 32 kbps (4 KB/s). */
+export function billableSeconds(transcript: Transcript, bytes: number): number {
+	return Math.max(1, Math.ceil(transcript.seconds ?? bytes / 4000));
+}
 
 // Whisper's well-known outputs for silence/noise (subtitle credits etc.).
 // A transcript that is *only* one of these is treated as "nothing heard".

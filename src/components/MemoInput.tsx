@@ -88,7 +88,7 @@ export function MemoInput({
 				</p>
 			)}
 			<button type="submit" className="primary" disabled={pending || voiceBusy || !text.trim() || sensitive.length > 0}>
-				{pending ? 'AI가 정리하는 중… (최대 1분)' : 'AI로 정리하기'}
+				{pending ? 'AI가 정리하는 중… (긴 글은 최대 2분)' : 'AI로 정리하기'}
 			</button>
 			{error && (
 				<p className="error" role="alert">

@@ -98,7 +98,8 @@ export function VoiceRecorder({
 			chunks.current = [];
 			finished.current = false;
 			const mimeType = pickMimeType();
-			const rec = new MediaRecorder(stream.current, mimeType ? { mimeType } : undefined);
+			// 32 kbps is plenty for speech and keeps 60 s ≈ 240 KB (server cap: 600 KB).
+			const rec = new MediaRecorder(stream.current, { ...(mimeType ? { mimeType } : {}), audioBitsPerSecond: 32_000 });
 			rec.ondataavailable = (e) => e.data.size > 0 && chunks.current.push(e.data);
 			rec.onstop = () => void finish(rec.mimeType || mimeType || '');
 			rec.onerror = () => void finish(rec.mimeType || mimeType || '');

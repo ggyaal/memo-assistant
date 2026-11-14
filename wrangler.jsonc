@@ -25,7 +25,10 @@
 		// Must be a free-plan Workers AI model that supports function calling.
 		"MEMO_MODEL": "cloudflare/@cf/zai-org/glm-4.7-flash",
 		"RATE_LIMIT_PER_MINUTE": "5",
-		"DAILY_AI_LIMIT": "150"
+		"DAILY_AI_LIMIT": "150",
+		// Estimated Neurons/day for memo organizing (30 + 0.4 × chars per request).
+		// With voice (30 min ≈ 1,400) this leaves ~2,600 of the 10,000 free Neurons in reserve.
+		"DAILY_AI_NEURONS": "6000"
 	},
 	"assets": {
 		"not_found_handling": "single-page-application",

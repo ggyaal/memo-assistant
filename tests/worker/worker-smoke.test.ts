@@ -107,6 +107,7 @@ describe('built Worker (workerd + local D1 + Flue Durable Object)', () => {
 		const json = (await res.json()) as { today: { used: number; limit: number }; total: number };
 		expect(json.today).toMatchObject({ used: 0, limit: 150 });
 		expect(json.total).toBe(0);
+		expect((json as unknown as { voice: unknown }).voice).toEqual({ usedSeconds: 0, limitSeconds: 1800 });
 	});
 
 	it('rejects invalid input before the agent', async () => {

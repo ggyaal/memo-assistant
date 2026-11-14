@@ -84,9 +84,12 @@ export interface ReorderRequest {
 
 export interface UsageResponse {
 	/** UTC day (resets 09:00 KST). `used` counts AI requests the server let through. */
-	today: { used: number; limit: number; resetsAt: string };
+	/** `neurons`/`neuronBudget`: estimated cost of memo organizing today vs. its daily budget. */
+	today: { used: number; limit: number; resetsAt: string; neurons: number; neuronBudget: number };
 	/** All-time AI requests since launch. */
 	total: number;
+	/** Voice-to-text audio seconds today (same UTC day) and the daily budget. */
+	voice: { usedSeconds: number; limitSeconds: number };
 }
 
 export type ApiErrorCode =
