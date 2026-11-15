@@ -1,3 +1,4 @@
+import { authorKey } from './author.ts';
 import type {
 	AgendaResponse,
 	CalendarResponse,
@@ -31,10 +32,19 @@ export class ApiRequestError extends Error {
 	}
 }
 
+/** Adds this browser's author key (public board "delete my memo") to same-origin API calls. */
+function withAuthor(init: RequestInit = {}, create = false): RequestInit {
+	const key = authorKey(create);
+	if (!key) return init;
+	const headers = new Headers(init.headers);
+	headers.set('x-author-key', key);
+	return { ...init, headers };
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
 	let response: Response;
 	try {
-		response = await fetch(path, init);
+		response = await fetch(path, withAuthor(init));
 	} catch {
 		throw new ApiRequestError('network_error', '서버에 연결하지 못했습니다. 네트워크를 확인해 주세요.', 0);
 	}
@@ -71,12 +81,18 @@ export async function createMemosWithProgress(
 	const cancelled = () => new ApiRequestError('cancelled', '메모 정리를 취소했어요. 입력한 글은 그대로 남아 있어요.', 0);
 	let response: Response;
 	try {
-		response = await fetch('/api/memos', {
-			method: 'POST',
-			headers: { 'content-type': 'application/json', accept: 'text/event-stream' },
-			body: JSON.stringify(input),
-			signal: options.signal,
-		});
+		response = await fetch(
+			'/api/memos',
+			withAuthor(
+				{
+					method: 'POST',
+					headers: { 'content-type': 'application/json', accept: 'text/event-stream' },
+					body: JSON.stringify(input),
+					signal: options.signal,
+				},
+				true, // writing a memo: make sure this browser has an author key
+			),
+		);
 	} catch {
 		if (options.signal.aborted) throw cancelled();
 		throw new ApiRequestError('network_error', '서버에 연결하지 못했습니다. 네트워크를 확인해 주세요.', 0);
@@ -288,4 +304,9 @@ export function chooseRecurrence(id: string, choice: 'repeat' | 'once'): Promise
 		headers: { 'content-type': 'application/json' },
 		body: JSON.stringify({ choice }),
 	});
+}
+
+/** Undo a delete. */
+export function restoreMemo(id: string): Promise<{ memo: Memo | null }> {
+	return request(`/api/memos/${encodeURIComponent(id)}/restore`, { method: 'POST' });
 }

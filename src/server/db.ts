@@ -22,6 +22,8 @@ export interface SourceRecord {
 	raw_text: string;
 	request_id: string;
 	created_at: string;
+	/** SHA-256 of the author's browser key (may be absent for old rows). */
+	author_key_hash?: string | null;
 }
 
 interface MemoRow {
@@ -46,6 +48,7 @@ interface MemoRow {
 	reminder_error: string | null;
 	recurrence: string | null;
 	recurrence_question: string | null;
+	author_key_hash: string | null;
 	position: number;
 	created_at: string;
 }
@@ -54,7 +57,7 @@ const MEMO_SELECT = `
 	SELECT m.id, m.source_id, s.nickname, s.raw_text, m.title, m.content, m.category,
 	       m.due_at, m.due_date, m.due_text, m.reminder_recommended, m.reminder_reason,
 	       m.priority, m.priority_reason, m.manual_rank, m.completed_at, m.position, m.created_at,
-	       m.recurrence, m.recurrence_question,
+	       m.recurrence, m.recurrence_question, s.author_key_hash,
 	       n.scheduled_at AS reminder_at, n.status AS reminder_status, n.last_error AS reminder_error
 	FROM memos m JOIN sources s ON s.id = m.source_id
 	LEFT JOIN notifications n ON n.memo_id = m.id AND n.channel = 'discord' AND n.status <> 'canceled'`;
@@ -80,6 +83,8 @@ function toMemo(row: MemoRow): Memo {
 		reminder: row.reminder_at && row.reminder_status ? { at: row.reminder_at, status: row.reminder_status, error: row.reminder_error } : null,
 		recurrence: parseRecurrence(row.recurrence),
 		recurrence_question: parseQuestion(row.recurrence_question),
+		// A short, non-reversible tag so a browser can recognise its own memos (the full hash stays on the server).
+		author_tag: row.author_key_hash ? row.author_key_hash.slice(0, 16) : null,
 		created_at: row.created_at,
 	};
 }
@@ -117,8 +122,8 @@ export async function saveSourceWithMemos(
 	const memoIds = memos.map(() => newId());
 	const statements = [
 		db
-			.prepare('INSERT INTO sources (id, workspace_id, nickname, raw_text, request_id, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-			.bind(source.id, source.workspace_id, source.nickname, source.raw_text, source.request_id, source.created_at),
+			.prepare('INSERT INTO sources (id, workspace_id, nickname, raw_text, request_id, created_at, author_key_hash) VALUES (?, ?, ?, ?, ?, ?, ?)')
+			.bind(source.id, source.workspace_id, source.nickname, source.raw_text, source.request_id, source.created_at, source.author_key_hash ?? null),
 		...memos.map((memo, index) =>
 			db
 				.prepare(
@@ -431,5 +436,35 @@ export async function setRecurrence(db: D1Database, workspaceId: string, id: str
 		)
 		.bind(rule ? JSON.stringify(rule) : null, first?.due_date ?? null, first ? 1 : 0, first?.due_at ?? null, id, workspaceId)
 		.run();
+	return (res.meta.changes ?? 0) > 0;
+}
+
+/** Facts needed to decide whether a memo may be deleted / restored. */
+export async function memoForRemoval(
+	db: D1Database,
+	workspaceId: string,
+	id: string,
+): Promise<{ author_key_hash: string | null; deleted_at: string | null } | null> {
+	return db
+		.prepare('SELECT s.author_key_hash, m.deleted_at FROM memos m JOIN sources s ON s.id = m.source_id WHERE m.id = ? AND m.workspace_id = ?')
+		.bind(id, workspaceId)
+		.first<{ author_key_hash: string | null; deleted_at: string | null }>();
+}
+
+/** Hide a memo (soft delete) and stop its pending reminders. Never a DELETE statement. */
+export async function softDeleteMemo(db: D1Database, workspaceId: string, id: string, now: Date): Promise<boolean> {
+	const nowIso = now.toISOString();
+	const [hidden] = await db.batch([
+		db.prepare('UPDATE memos SET deleted_at = ? WHERE id = ? AND workspace_id = ? AND deleted_at IS NULL').bind(nowIso, id, workspaceId),
+		db
+			.prepare("UPDATE notifications SET status = 'canceled', last_error = 'memo_deleted', updated_at = ? WHERE memo_id = ? AND workspace_id = ? AND status IN ('scheduled', 'failed')")
+			.bind(nowIso, id, workspaceId),
+	]);
+	return (hidden.meta.changes ?? 0) > 0;
+}
+
+/** Undo a delete. Reminders stay off (the person can turn them on again). */
+export async function restoreMemo(db: D1Database, workspaceId: string, id: string): Promise<boolean> {
+	const res = await db.prepare('UPDATE memos SET deleted_at = NULL WHERE id = ? AND workspace_id = ? AND deleted_at IS NOT NULL').bind(id, workspaceId).run();
 	return (res.meta.changes ?? 0) > 0;
 }

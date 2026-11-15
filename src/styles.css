@@ -1569,3 +1569,53 @@ p.reminder {
 	width: auto;
 	margin: 0;
 }
+
+/* Delete on memo cards */
+.memo-card__delete {
+	color: var(--error);
+}
+.memo-card__confirm {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	justify-content: space-between;
+	gap: 6px 12px;
+	padding: 8px 10px;
+	border: 1px solid var(--error);
+	border-radius: 8px;
+	background: var(--bg);
+}
+.memo-card__confirm-actions {
+	display: inline-flex;
+	align-items: center;
+	gap: 10px;
+}
+.memo-card--deleted {
+	border-style: dashed;
+	opacity: 0.85;
+}
+.memo-card--deleted p {
+	margin: 0;
+}
+
+/* Side cards: long lists scroll inside the card (user request) */
+.side-card__body {
+	max-height: 420px;
+	overflow-y: auto;
+	overscroll-behavior: contain;
+	padding-right: 2px;
+}
+button.danger {
+	padding: 6px 12px;
+	border: 0;
+	border-radius: 8px;
+	background: var(--error);
+	color: #fff;
+	font: inherit;
+	font-weight: 600;
+	cursor: pointer;
+}
+button.danger:disabled {
+	opacity: 0.6;
+	cursor: not-allowed;
+}

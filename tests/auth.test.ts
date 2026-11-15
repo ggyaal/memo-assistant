@@ -702,6 +702,28 @@ describe('repeating reminders (one DM per occurrence, never twice)', () => {
 	});
 });
 
+describe('personal space: delete any of my memos', () => {
+	const json = { 'content-type': 'application/json' };
+	it('owner deletes any memo (not only overdue), its reminder stops, undo works; others and guests cannot', async () => {
+		const send = makeApp();
+		const jar = (await login(send, 'discord', 'alice')).jar;
+		await send('/api/settings/notifications/discord', { method: 'PUT', jar, headers: json, body: JSON.stringify({ enabled: true }) });
+		await postMemo(send, '내일 오후 3시 회의', jar);
+		const list = async (j?: Jar) => ((await (await send('/api/memos?scope=all', { jar: j })).json()) as { memos: { id: string; reminder: unknown }[] }).memos;
+		const [memo] = await list(jar);
+		await send(`/api/memos/${memo.id}/reminder`, { method: 'PUT', jar, headers: json, body: JSON.stringify({ leadMinutes: 30 }) });
+		const bob = (await login(send, 'discord', 'bob')).jar;
+		expect((await send(`/api/memos/${memo.id}`, { method: 'DELETE', jar: bob })).status).toBe(404);
+		expect((await send(`/api/memos/${memo.id}`, { method: 'DELETE' })).status).toBe(404);
+		expect((await send(`/api/memos/${memo.id}`, { method: 'DELETE', jar })).status).toBe(200);
+		expect(await list(jar)).toEqual([]);
+		expect((await db.prepare('SELECT status, last_error FROM notifications').first())).toEqual({ status: 'canceled', last_error: 'memo_deleted' });
+		expect((await send(`/api/memos/${memo.id}/restore`, { method: 'POST', jar: bob })).status).toBe(404);
+		expect((await send(`/api/memos/${memo.id}/restore`, { method: 'POST', jar })).status).toBe(200);
+		expect((await list(jar))[0]).toMatchObject({ id: memo.id, reminder: null }); // back, reminder stays off
+	});
+});
+
 describe('calendar keeps personal and shared data apart', () => {
 	it('each space sees only its own dated memos; the guest calendar never shows personal memos', async () => {
 		const send = makeApp();

@@ -26,6 +26,9 @@ import {
 	listCalendar,
 	listIdeas,
 	listRepeating,
+	memoForRemoval,
+	restoreMemo,
+	softDeleteMemo,
 	setOccurrenceDone,
 	setRecurrence,
 	listOverdue,
@@ -57,6 +60,7 @@ import {
 } from './notify/reminders.ts';
 import { type Channel, CHANNELS, channelStatuses, getReminderTone, sendTonePreview, setChannel, setDisplayName, setReminderTone, type SettingsEnv } from './settings.ts';
 import { type AuthVariables, registerAuthRoutes, resolveAuth } from './auth/routes.ts';
+import { sha256Hex } from './auth/crypto.ts';
 import { kstDate, kstDayRangeUtc } from './time.ts';
 import { expand, isOccurrence, loadDone, occurrenceAt, withUpcoming } from './occurrences.ts';
 import { nextOccurrence, type Recurrence, type Weekday } from '../shared/recurrence.ts';
@@ -640,6 +644,10 @@ export function createApi(deps: ApiDeps) {
 
 	// Remove an item from "지나버린 일". Soft delete, overdue + not-done only.
 	// Shared board: the memo disappears for every visitor.
+	// Delete (hide) a memo.
+	// - Personal space: any of the owner's memos.
+	// - Public board: memos written from this browser (author key hash matches); anyone else's
+	//   memo only once it is overdue and not done (unchanged rule, so the board cannot be emptied).
 	api.delete('/memos/:id', async (c) => {
 		const blocked = crossSiteBlock(c, false);
 		if (blocked) return blocked;
@@ -649,16 +657,46 @@ export function createApi(deps: ApiDeps) {
 			const current = now();
 			const limited = await mutationLimit(c, current);
 			if (limited) return limited;
-			const result = await deleteOverdueMemo(c.env.DB, c.get('auth').workspace.id, id.output, current, kstDate(current));
+			const { workspace } = c.get('auth');
+			const memo = await memoForRemoval(c.env.DB, workspace.id, id.output);
+			if (!memo || memo.deleted_at) return fail(c, 404, 'not_found', '메모를 찾지 못했습니다.');
+			const mine = !!memo.author_key_hash && memo.author_key_hash === (await authorKeyHash(c));
+			if (workspace.kind === 'personal' || mine) {
+				await softDeleteMemo(c.env.DB, workspace.id, id.output, current);
+				return c.json({ deleted: id.output });
+			}
+			const result = await deleteOverdueMemo(c.env.DB, workspace.id, id.output, current, kstDate(current));
 			if (result === 'not_found') return fail(c, 404, 'not_found', '메모를 찾지 못했습니다.');
 			if (result === 'not_overdue') {
-				return fail(c, 409, 'conflict', '기한이 지났고 완료되지 않은 메모만 삭제할 수 있습니다.');
+				return fail(c, 409, 'conflict', '공개 공간에서는 내가 쓴 메모, 또는 기한이 지났고 완료되지 않은 메모만 삭제할 수 있어요.');
 			}
+			await softDeleteMemo(c.env.DB, workspace.id, id.output, current); // already hidden; also stops its reminders
 			return c.json({ deleted: id.output });
 		} catch (error) {
 			console.error('delete failed', describeError(error));
 			return fail(c, 500, 'db_error', '삭제하지 못했습니다.');
 		}
+	});
+
+	// Undo a delete ("되돌리기"): the owner of a personal space, the author on the public board,
+	// or anyone within 10 minutes on the public board (undoing a hide only brings a memo back).
+	api.post('/memos/:id/restore', async (c) => {
+		const blocked = crossSiteBlock(c, false);
+		if (blocked) return blocked;
+		const id = v.safeParse(MemoIdSchema, c.req.param('id'));
+		if (!id.success) return fail(c, 400, 'invalid_request', issuesToMessage(id.issues));
+		const current = now();
+		const limited = await mutationLimit(c, current);
+		if (limited) return limited;
+		const { workspace } = c.get('auth');
+		const memo = await memoForRemoval(c.env.DB, workspace.id, id.output);
+		if (!memo?.deleted_at) return fail(c, 404, 'not_found', '되돌릴 메모가 없어요.');
+		const mine = !!memo.author_key_hash && memo.author_key_hash === (await authorKeyHash(c));
+		const recent = current.getTime() - Date.parse(memo.deleted_at) <= 10 * 60_000;
+		if (!(workspace.kind === 'personal' || mine || recent)) return fail(c, 409, 'conflict', '되돌릴 수 있는 시간이 지났어요.');
+		await restoreMemo(c.env.DB, workspace.id, id.output);
+		const fresh = await getMemo(c.env.DB, workspace.id, id.output);
+		return c.json({ memo: fresh ? (await withUpcoming(c.env.DB, [fresh], current))[0] : null });
 	});
 
 	api.get('/memos', async (c) => {
@@ -850,6 +888,7 @@ export function createApi(deps: ApiDeps) {
 					nickname,
 					rawText: input.text,
 					createdAt: now().toISOString(),
+					authorKeyHash: await authorKeyHash(c),
 				},
 				{ timeoutMs, onProgress, signal },
 			);
@@ -888,4 +927,10 @@ function ruleFromForm(repeat: NonNullable<v.InferOutput<typeof EditMemoSchema>['
 	if (repeat.kind === 'daily') return { kind: 'daily', start };
 	if (repeat.kind === 'monthly') return { kind: 'monthly', day: Number(start.slice(8)), start };
 	return { kind: 'weekly', days: [...new Set(repeat.days)].sort((a, b) => a - b) as Weekday[], interval: repeat.interval, start };
+}
+
+/** SHA-256 of this browser's author key (header x-author-key, 64 hex), or null. */
+async function authorKeyHash(c: ApiContext): Promise<string | null> {
+	const key = c.req.header('x-author-key') ?? '';
+	return /^[0-9a-f]{64}$/.test(key) ? sha256Hex(key) : null;
 }

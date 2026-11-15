@@ -52,6 +52,8 @@ export interface Memo {
 	recurrence_question: RecurrenceQuestion | null;
 	/** For a repeating memo shown as one occurrence (list "next", calendar day, agenda). */
 	occurrence?: MemoOccurrence;
+	/** First 16 hex of the author key hash (public board); a browser compares it with its own. */
+	author_tag?: string | null;
 	/** When the memo was saved (UTC ISO 8601). Not the schedule time. */
 	created_at: string;
 }

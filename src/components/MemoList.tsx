@@ -86,6 +86,8 @@ export function MemoList({ refreshKey, onChanged }: { refreshKey: number; onChan
 							void load(null);
 							onChanged?.();
 						}}
+						// A delete keeps the card's undo bar here; only the other panels refresh.
+						onRemoved={() => onChanged?.()}
 					/>
 				))}
 			</div>

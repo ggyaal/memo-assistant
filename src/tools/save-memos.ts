@@ -15,6 +15,8 @@ export const MemoJobSchema = v.object({
 	nickname: v.string(),
 	rawText: v.string(),
 	createdAt: v.pipe(v.string(), v.isoTimestamp()),
+	/** SHA-256 of the browser's author key (public board "delete my memo"); set by the server. */
+	authorKeyHash: v.optional(v.nullable(v.pipe(v.string(), v.regex(/^[0-9a-f]{64}$/)))),
 });
 
 export type MemoJob = v.InferOutput<typeof MemoJobSchema>;
@@ -58,6 +60,7 @@ export function createSaveMemosTool(deps: {
 					raw_text: job.rawText,
 					request_id: job.requestId,
 					created_at: job.createdAt,
+					author_key_hash: job.authorKeyHash ?? null,
 				},
 				memos,
 			);
