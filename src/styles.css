@@ -1670,3 +1670,75 @@ button.danger:disabled {
 	opacity: 0.6;
 	cursor: not-allowed;
 }
+
+/* Folded input card: one-line status while voice text is organized right away */
+.memo-input__status {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 6px 8px;
+	margin: 8px 0 0;
+	color: var(--muted);
+}
+.memo-input__status.is-done {
+	color: var(--todo);
+	font-weight: 600;
+}
+.memo-input__spinner {
+	width: 14px;
+	height: 14px;
+	border-radius: 50%;
+	border: 2px solid var(--border);
+	border-top-color: var(--primary);
+	animation: organize-spin 0.8s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+	.memo-input__spinner {
+		animation: none;
+		border-color: var(--primary);
+	}
+}
+
+/* "방금 정리된 메모": folded by default */
+.result__title {
+	margin: 0 0 8px;
+}
+.result.is-collapsed .result__title {
+	margin-bottom: 0;
+}
+.result__toggle {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	width: 100%;
+	padding: 10px 12px;
+	border: 1px solid var(--border);
+	border-radius: 10px;
+	background: var(--surface);
+	color: inherit;
+	font: inherit;
+	font-weight: 700;
+	text-align: left;
+	cursor: pointer;
+}
+.result__toggle:hover {
+	border-color: var(--primary);
+}
+.result__toggle:focus-visible {
+	outline: 2px solid var(--primary);
+	outline-offset: 2px;
+}
+.result__chevron {
+	color: var(--muted);
+}
+.cards[hidden] {
+	display: none;
+}
+/* Long results scroll inside the section (user request). */
+.result .cards {
+	max-height: 480px;
+	overflow-y: auto;
+	overscroll-behavior: contain;
+	padding-right: 4px;
+}

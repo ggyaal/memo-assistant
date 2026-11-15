@@ -58,8 +58,8 @@ export function VoiceRecorder({
 	disabled?: boolean;
 	/** Text on the button while idle (the button is always announced as "음성으로 입력"). */
 	idleLabel?: string;
-	/** Shown after the speech became text (e.g. when it is sent right away). */
-	doneMessage?: string;
+	/** Shown after the speech became text; null = no note (the caller shows its own status). */
+	doneMessage?: string | null;
 }) {
 	const [phase, setPhase] = useState<Phase>('idle');
 	const [seconds, setSeconds] = useState(0);
@@ -168,7 +168,7 @@ export function VoiceRecorder({
 		try {
 			const { text } = await transcribeAudio(audio);
 			onTranscript(text);
-			setMessage({ text: doneMessage, error: false });
+			setMessage(doneMessage === null ? null : { text: doneMessage, error: false });
 		} catch (error) {
 			setMessage({
 				text: error instanceof ApiRequestError ? error.message : '음성을 글로 바꾸지 못했어요. 텍스트로 입력해 주세요.',

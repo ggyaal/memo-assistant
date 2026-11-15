@@ -10,6 +10,15 @@ const EXAMPLE = '오늘 장 보고, 내일 오후 3시에 병원 예약해야 �
 
 const AUTO_SEND_KEY = 'memo-assistant:voice-auto-send';
 
+/** One-line progress for the folded card (same server-reported steps as the full list). */
+const QUIET_STATUS: Record<OrganizeStage, (count: number | null) => string> = {
+	checking: () => '입력 내용을 확인하고 있어요…',
+	analyzing: () => 'AI가 메모를 분석하고 있어요…',
+	found: (n) => `메모 ${n ?? ''}개를 발견했어요…`,
+	saving: () => '정리된 메모를 저장하고 있어요…',
+	done: (n) => `✓ 메모 ${n ?? 0}개를 정리했어요.`,
+};
+
 /** Playful labels for the voice button while the card is folded; one is picked per visit. */
 export const VOICE_PROMPTS = [
 	'주저리.. 주저리..',
@@ -125,7 +134,10 @@ export function MemoInput({
 		}
 	}
 
-	const open = expanded || pending || !!text.trim() || !!error || !!progress;
+	// "바로 보내기" from the folded card: stay folded and show a one-line status instead (user request).
+	// An error (or text blocked on the public board) still opens it so the text is not lost.
+	const [quiet, setQuiet] = useState(false);
+	const open = expanded || !!error || (!quiet && (pending || !!text.trim() || !!progress));
 	useEffect(() => {
 		if (open && focusWhenOpen.current) {
 			focusWhenOpen.current = false;
@@ -138,15 +150,22 @@ export function MemoInput({
 			<VoiceRecorder
 				disabled={pending}
 				idleLabel={open ? '음성으로 입력' : voicePrompt}
-				doneMessage={autoSend ? '음성을 글로 바꿨어요. 바로 AI로 정리할게요.' : undefined}
+				doneMessage={autoSend ? (open ? '음성을 글로 바꿨어요. 바로 AI로 정리할게요.' : null) : undefined}
 				onBusyChange={setVoiceBusy}
 				onTranscript={(spoken) => {
 					// Append to whatever is already typed; open the card (to review, or to show the progress).
 					const next = (text.trim() ? `${text.trim()} ${spoken}` : spoken).slice(0, LIMITS.textMax);
 					setText(next);
-					setExpanded(true);
-					if (autoSend) void submit(undefined, next);
-					else focusWhenOpen.current = true;
+					const blocked = shared && detectSensitive(next).length > 0;
+					if (autoSend && !blocked) {
+						// Sent right away: a folded card stays folded; an open one keeps showing the steps.
+						setQuiet(!open);
+						void submit(undefined, next);
+					} else {
+						setQuiet(false);
+						setExpanded(true);
+						focusWhenOpen.current = true;
+					}
 				}}
 			/>
 			<label className="voice-autosend small" title={shared ? '검토 없이 바로 공개 공간에 정리돼요' : '검토 없이 바로 정리해요'}>
@@ -167,12 +186,25 @@ export function MemoInput({
 						aria-expanded={false}
 						onClick={() => {
 							focusWhenOpen.current = true;
+							setQuiet(false);
+							setProgress(null);
 							setExpanded(true);
 						}}
 					>
 						⌨️ 글로 쓰기 ▾
 					</button>
 				</div>
+				{quiet && progress && (
+					<p className={`memo-input__status small${progress.stage === 'done' ? ' is-done' : ''}`} role="status" aria-live="polite">
+						{progress.stage !== 'done' && <span className="memo-input__spinner" aria-hidden="true" />}
+						{QUIET_STATUS[progress.stage](progress.count)}
+						{pending && progress.stage === 'analyzing' && !cancelling && (
+							<button type="button" className="link-button small" onClick={() => void cancel()}>
+								취소
+							</button>
+						)}
+					</p>
+				)}
 			</section>
 		);
 	}

@@ -170,6 +170,8 @@ function WorkspaceView({
 	const setNickname = setGuestNickname;
 	const [draft, setDraft] = useState(nickname);
 	const [lastResult, setLastResult] = useState<CreateMemosResponse | null>(null);
+	// "방금 정리된 메모" is folded by default (also for each new result); the list below has the same memos.
+	const [resultOpen, setResultOpen] = useState(false);
 	const [refreshKey, setRefreshKey] = useState(0);
 	const [usageKey, setUsageKey] = useState(0);
 	// Bumped after a board edit (done / reorder / delete) to reload the side panel only.
@@ -239,6 +241,7 @@ function WorkspaceView({
 							nickname={nickname}
 							onCreated={(result) => {
 								setLastResult(result);
+								setResultOpen(false);
 								setRefreshKey((k) => k + 1);
 							}}
 							onSettled={() => setUsageKey((k) => k + 1)}
@@ -269,11 +272,19 @@ function WorkspaceView({
 				)}
 
 				{lastResult && (
-					<section className="result" aria-live="polite">
-						<h2>
-							방금 정리된 메모 {lastResult.memos.length}개{lastResult.duplicate && ' (이미 저장된 요청)'}
+					<section className={`result${resultOpen ? '' : ' is-collapsed'}`} aria-live="polite">
+						<h2 className="result__title">
+							<button type="button" className="result__toggle" aria-expanded={resultOpen} aria-controls="last-result-cards" onClick={() => setResultOpen((o) => !o)}>
+								<span>
+									방금 정리된 메모 {lastResult.memos.length}개{lastResult.duplicate && ' (이미 저장된 요청)'}
+								</span>
+								<span className="result__chevron" aria-hidden="true">
+									{resultOpen ? '▾' : '▸'}
+								</span>
+								<span className="sr-only">{resultOpen ? '접기' : '펼치기'}</span>
+							</button>
 						</h2>
-						<div className="cards">
+						<div id="last-result-cards" className="cards" hidden={!resultOpen}>
 							{lastResult.memos.map((memo) => (
 								<MemoCard key={memo.id} memo={memo} showSource={false} onChanged={() => setRefreshKey((k) => k + 1)} />
 							))}
