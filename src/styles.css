@@ -148,12 +148,52 @@ button:disabled {
 	border-radius: 8px;
 	padding: 10px;
 }
+/* Small action buttons (formerly underlined text links): one look everywhere. */
 .link-button {
-	background: none;
-	border: none;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 4px;
+	min-height: 32px;
+	padding: 4px 12px;
+	border: 1px solid var(--border);
+	border-radius: 8px;
+	background: var(--surface);
+	color: var(--text);
+	font: inherit;
+	font-size: 0.875rem;
+	font-weight: 600;
+	line-height: 1.2;
+	text-decoration: none;
+	white-space: nowrap;
+	vertical-align: middle;
+	cursor: pointer;
+	transition:
+		background-color 0.15s,
+		border-color 0.15s,
+		color 0.15s;
+}
+.link-button:hover:not(:disabled) {
+	border-color: var(--primary);
 	color: var(--primary);
-	padding: 0 4px;
-	text-decoration: underline;
+}
+.link-button:focus-visible {
+	outline: 2px solid var(--primary);
+	outline-offset: 2px;
+}
+.link-button.small {
+	min-height: 28px;
+	padding: 3px 10px;
+	font-size: 0.8rem;
+}
+/* A button inside a sentence keeps a little distance from the text. */
+p .link-button,
+span .link-button {
+	margin-left: 6px;
+}
+.secondary.small {
+	padding: 6px 12px;
+	font-size: 0.875rem;
 }
 
 .error {
@@ -207,8 +247,13 @@ button:disabled {
 .memo-card__footer {
 	display: flex;
 	flex-wrap: wrap;
-	gap: 4px 12px;
+	align-items: center;
+	gap: 6px 12px;
 	margin-top: 8px;
+}
+/* Card actions sit together at the end of the footer. */
+.memo-card__footer .link-button:first-of-type {
+	margin-left: auto;
 }
 .memo-card__source {
 	margin: 8px 0 0;
@@ -1573,6 +1618,12 @@ p.reminder {
 /* Delete on memo cards */
 .memo-card__delete {
 	color: var(--error);
+	border-color: var(--error);
+}
+.memo-card__delete:hover:not(:disabled) {
+	background: var(--error);
+	border-color: var(--error);
+	color: #fff;
 }
 .memo-card__confirm {
 	display: flex;
