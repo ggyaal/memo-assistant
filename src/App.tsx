@@ -175,7 +175,7 @@ function WorkspaceView({
 	// Bumped after a board edit (done / reorder / delete) to reload the side panel only.
 	const [agendaKey, setAgendaKey] = useState(0);
 	// "📝 메모 목록" or "📅 캘린더": two views of the same memo rows (remembered per browser).
-	const [mainView, setMainView] = useState<'list' | 'calendar'>(() => (readStorage(MAIN_VIEW_KEY) === 'calendar' ? 'calendar' : 'list'));
+	const [mainView, setMainView] = useState<'list' | 'calendar'>(() => (readStorage(MAIN_VIEW_KEY) === 'list' ? 'list' : 'calendar')); // calendar first by default
 	const chooseView = (next: 'list' | 'calendar') => {
 		setMainView(next);
 		writeStorage(MAIN_VIEW_KEY, next);
@@ -289,17 +289,17 @@ function WorkspaceView({
 
 			<div className="layout__bottom">
 				<div className="view-tabs" role="tablist" aria-label="보기 전환">
-					<button type="button" role="tab" aria-selected={mainView === 'list'} className={`view-tab${mainView === 'list' ? ' is-active' : ''}`} onClick={() => chooseView('list')}>
-						📝 메모 목록
-					</button>
 					<button type="button" role="tab" aria-selected={mainView === 'calendar'} className={`view-tab${mainView === 'calendar' ? ' is-active' : ''}`} onClick={() => chooseView('calendar')}>
 						📅 캘린더
 					</button>
+					<button type="button" role="tab" aria-selected={mainView === 'list'} className={`view-tab${mainView === 'list' ? ' is-active' : ''}`} onClick={() => chooseView('list')}>
+						📝 메모 목록
+					</button>
 				</div>
-				{mainView === 'list' ? (
-					<MemoList refreshKey={refreshKey} onChanged={() => setAgendaKey((k) => k + 1)} />
-				) : (
+				{mainView === 'calendar' ? (
 					<CalendarView refreshKey={refreshKey} onChanged={() => setAgendaKey((k) => k + 1)} />
+				) : (
+					<MemoList refreshKey={refreshKey} onChanged={() => setAgendaKey((k) => k + 1)} />
 				)}
 
 				<footer className="muted small center footer">

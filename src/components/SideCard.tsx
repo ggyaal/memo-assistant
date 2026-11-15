@@ -2,11 +2,13 @@ import { type ReactNode, useId, useState } from 'react';
 
 const KEY = (id: string) => `memo-assistant:side:${id}:collapsed`;
 
-function readCollapsed(id: string): boolean {
+/** The person's own choice wins; otherwise the card's default. */
+function readCollapsed(id: string, fallback: boolean): boolean {
 	try {
-		return localStorage.getItem(KEY(id)) === '1';
+		const saved = localStorage.getItem(KEY(id));
+		return saved === null ? fallback : saved === '1';
 	} catch {
-		return false; // storage blocked: just start expanded
+		return fallback; // storage blocked: use the default
 	}
 }
 
@@ -19,6 +21,7 @@ export function SideCard({
 	title,
 	extra,
 	className = '',
+	defaultCollapsed = false,
 	children,
 }: {
 	id: string;
@@ -26,9 +29,11 @@ export function SideCard({
 	/** Shown next to the title even when folded (e.g. a count badge). */
 	extra?: ReactNode;
 	className?: string;
+	/** Folded until the person opens it (and then remembered). */
+	defaultCollapsed?: boolean;
 	children: ReactNode;
 }) {
-	const [collapsed, setCollapsed] = useState(() => readCollapsed(id));
+	const [collapsed, setCollapsed] = useState(() => readCollapsed(id, defaultCollapsed));
 	const bodyId = useId();
 	function toggle() {
 		setCollapsed((c) => {

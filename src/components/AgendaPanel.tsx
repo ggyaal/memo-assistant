@@ -71,6 +71,7 @@ export function AgendaPanel({ refreshKey, onChanged }: { refreshKey: number; onC
 
 			<SideCard
 				id="ranked"
+				defaultCollapsed
 				title={
 					<>
 						📋 일정 우선순위 <span className="muted small">끌어서 순서 변경</span>
@@ -89,6 +90,7 @@ export function AgendaPanel({ refreshKey, onChanged }: { refreshKey: number; onC
 
 			<SideCard
 				id="ideas"
+				defaultCollapsed
 				title={
 					<>
 						💡 아이디어 목록 <span className="muted small">최신순</span>
@@ -117,6 +119,7 @@ export function AgendaPanel({ refreshKey, onChanged }: { refreshKey: number; onC
 
 			<SideCard
 				id="overdue"
+				defaultCollapsed
 				className="agenda__section--overdue"
 				title={
 					<>
