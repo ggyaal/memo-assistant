@@ -8,6 +8,8 @@ import { LIMITS, type CreateMemosResponse } from '../shared/types.ts';
 
 const EXAMPLE = '오늘 장 보고, 내일 오후 3시에 병원 예약해야 해. AI 검색 기능 아이디어도 메모해 줘.';
 
+const AUTO_SEND_KEY = 'memo-assistant:voice-auto-send';
+
 /** Playful labels for the voice button while the card is folded; one is picked per visit. */
 export const VOICE_PROMPTS = [
 	'주저리.. 주저리..',
@@ -41,6 +43,22 @@ export function MemoInput({
 	// Reused only when retrying the same text, so the server can de-duplicate.
 	const pendingRequest = useRef<{ text: string; requestId: string } | null>(null);
 	// Live steps reported by the server (null = nothing to show).
+	// "바로 보내기": recognized speech goes straight to "AI로 정리하기" (on by default — user decision; turning it off is remembered).
+	const [autoSend, setAutoSend] = useState(() => {
+		try {
+			return localStorage.getItem(AUTO_SEND_KEY) !== '0';
+		} catch {
+			return true;
+		}
+	});
+	function chooseAutoSend(on: boolean) {
+		setAutoSend(on);
+		try {
+			localStorage.setItem(AUTO_SEND_KEY, on ? '1' : '0');
+		} catch {
+			// convenience only
+		}
+	}
 	// Folded by default: only the voice button shows. Typed text, a run or an error keep it open.
 	const [expanded, setExpanded] = useState(false);
 	const [voicePrompt] = useState(() => VOICE_PROMPTS[Math.floor(Math.random() * VOICE_PROMPTS.length)]);
@@ -64,11 +82,14 @@ export function MemoInput({
 		setCancelling(false);
 	}
 
-	async function submit(event?: FormEvent) {
+	/** `spoken`: text just recognized from voice with "바로 보내기" on (sent without the review step). */
+	async function submit(event?: FormEvent, spoken?: string) {
 		event?.preventDefault();
-		const trimmed = text.trim();
+		const trimmed = (spoken ?? text).trim();
+		// Same public-board check as typing: never sent with personal data (the warning shows instead).
+		const blocked = shared ? detectSensitive(trimmed) : [];
 		// inFlight blocks a second click even before React re-renders the disabled button.
-		if (!trimmed || pending || inFlight.current || voiceBusy || sensitive.length > 0) return;
+		if (!trimmed || pending || inFlight.current || (voiceBusy && spoken === undefined) || blocked.length > 0) return;
 		if (pendingRequest.current?.text !== trimmed) {
 			pendingRequest.current = { text: trimmed, requestId: crypto.randomUUID() };
 		}
@@ -113,17 +134,26 @@ export function MemoInput({
 	}, [open, text]);
 
 	const voice = (
-		<VoiceRecorder
-			disabled={pending}
-			idleLabel={open ? '음성으로 입력' : voicePrompt}
-			onBusyChange={setVoiceBusy}
-			onTranscript={(spoken) => {
-				// Append to whatever is already typed; open the card so the person reviews before submitting.
-				setText((current) => (current.trim() ? `${current.trim()} ${spoken}` : spoken).slice(0, LIMITS.textMax));
-				focusWhenOpen.current = true;
-				setExpanded(true);
-			}}
-		/>
+		<div className="voice-row">
+			<VoiceRecorder
+				disabled={pending}
+				idleLabel={open ? '음성으로 입력' : voicePrompt}
+				doneMessage={autoSend ? '음성을 글로 바꿨어요. 바로 AI로 정리할게요.' : undefined}
+				onBusyChange={setVoiceBusy}
+				onTranscript={(spoken) => {
+					// Append to whatever is already typed; open the card (to review, or to show the progress).
+					const next = (text.trim() ? `${text.trim()} ${spoken}` : spoken).slice(0, LIMITS.textMax);
+					setText(next);
+					setExpanded(true);
+					if (autoSend) void submit(undefined, next);
+					else focusWhenOpen.current = true;
+				}}
+			/>
+			<label className="voice-autosend small" title={shared ? '검토 없이 바로 공개 공간에 정리돼요' : '검토 없이 바로 정리해요'}>
+				<input type="checkbox" checked={autoSend} disabled={pending} onChange={(e) => chooseAutoSend(e.target.checked)} />
+				바로 보내기
+			</label>
+		</div>
 	);
 
 	if (!open) {
