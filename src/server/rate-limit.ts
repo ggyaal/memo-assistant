@@ -151,7 +151,7 @@ export async function consumeAiQuota(
 }
 
 export interface UsageSnapshot {
-	today: { used: number; limit: number; resetsAt: string; neurons: number; neuronBudget: number };
+	today: { used: number; limit: number; resetsAt: string; neurons: number; neuronBudget: number; actualNeurons: number };
 	total: number;
 	voice: { usedSeconds: number; limitSeconds: number };
 }
@@ -170,8 +170,8 @@ export async function readUsage(
 ): Promise<UsageSnapshot> {
 	const { key: dayKey, end: dayEnd } = utcDay(now);
 	const { results } = await db
-		.prepare('SELECT counter_key, count, expires_at FROM usage_counters WHERE counter_key IN (?, ?, ?, ?)')
-		.bind(dayKey, TOTAL_KEY, VOICE_SECONDS_PREFIX + dayKey, MEMO_NEURONS_PREFIX + dayKey)
+		.prepare('SELECT counter_key, count, expires_at FROM usage_counters WHERE counter_key IN (?, ?, ?, ?, ?)')
+		.bind(dayKey, TOTAL_KEY, VOICE_SECONDS_PREFIX + dayKey, MEMO_NEURONS_PREFIX + dayKey, `ai-actual-mn:${now.toISOString().slice(0, 10)}`)
 		.all<{ counter_key: string; count: number; expires_at: string }>();
 	const day = results.find((r) => r.counter_key === dayKey && r.expires_at > now.toISOString());
 	const total = results.find((r) => r.counter_key === TOTAL_KEY);
@@ -185,6 +185,8 @@ export async function readUsage(
 				neuronBudget,
 			),
 			neuronBudget,
+			// Measured: Neurons from the model's real token counts (official price list), organizing only.
+			actualNeurons: Math.round((results.find((r) => r.counter_key === `ai-actual-mn:${now.toISOString().slice(0, 10)}`)?.count ?? 0) / 1000),
 		},
 		total: total?.count ?? 0,
 		voice: {
@@ -195,4 +197,34 @@ export async function readUsage(
 			limitSeconds: voiceLimitSeconds,
 		},
 	};
+}
+
+/**
+ * Workers AI price of @cf/zai-org/glm-4.7-flash (developers.cloudflare.com/workers-ai/platform/pricing,
+ * checked 2026-11-16): 5,500 Neurons per M input tokens, 36,400 per M output tokens.
+ */
+export const MEMO_MODEL_NEURONS = { inputPerMillion: 5_500, outputPerMillion: 36_400 } as const;
+
+/** Neurons of one run from real token counts (exact per the price list, not an estimate). */
+export function neuronsFromTokens(usage: { input: number; output: number }): number {
+	return (usage.input * MEMO_MODEL_NEURONS.inputPerMillion + usage.output * MEMO_MODEL_NEURONS.outputPerMillion) / 1_000_000;
+}
+
+const ACTUAL_PREFIX = 'ai-actual-mn:'; // milli-Neurons actually used by memo organizing, per UTC day
+
+/** Record real usage of one run (kept apart from the pre-check estimate). Returns the Neurons added. */
+export async function recordActualNeurons(db: D1Database, usage: { input: number; output: number }, now: Date): Promise<number> {
+	const neurons = neuronsFromTokens(usage);
+	const day = now.toISOString().slice(0, 10);
+	const end = new Date(Date.parse(`${day}T00:00:00Z`) + 2 * 86_400_000).toISOString();
+	await addTo(db, `${ACTUAL_PREFIX}${day}`, Math.round(neurons * 1000), end);
+	return neurons;
+}
+
+export async function actualNeuronsToday(db: D1Database, now: Date): Promise<number> {
+	const row = await db
+		.prepare('SELECT count FROM usage_counters WHERE counter_key = ?')
+		.bind(`${ACTUAL_PREFIX}${now.toISOString().slice(0, 10)}`)
+		.first<{ count: number }>();
+	return Math.round((row?.count ?? 0) / 1000);
 }

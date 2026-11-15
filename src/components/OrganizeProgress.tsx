@@ -16,6 +16,8 @@ function stepText(stage: OrganizeStage, state: 'current' | 'past' | 'future', co
 			return state === 'future' || count === null ? '메모 찾기' : `메모 ${count}개를 발견했어요.`;
 		case 'saving':
 			return state === 'current' ? '정리된 메모를 저장하고 있어요.' : state === 'past' ? '정리된 메모를 저장했어요.' : '저장';
+		case 'questions':
+			return state === 'future' ? '확인' : '확인할 내용이 있어요.';
 		case 'done':
 			return state === 'future' ? '완료' : '메모 정리가 완료됐어요.';
 	}

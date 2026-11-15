@@ -1,12 +1,12 @@
 'use agent';
-import { useDataWriter, useInitialData, useModel, useTool } from '@flue/runtime';
+import { useDataWriter, useInitialData, useModel, useResponseFinish, useTool } from '@flue/runtime';
 import * as v from 'valibot';
 import { env } from 'cloudflare:workers';
 import { createSaveMemosTool, type MemoJob, MemoJobSchema } from '../tools/save-memos.ts';
 
 /** Name of the data part that carries save progress to the waiting request. */
 export const PROGRESS_PART = 'progress';
-const ProgressSchema = v.object({ stage: v.picklist(['found', 'saving']), count: v.number() });
+const ProgressSchema = v.object({ stage: v.picklist(['found', 'saving', 'questions']), count: v.number() });
 
 /** Free-plan Workers AI model with function calling (see docs/PROGRESS.md). */
 export const DEFAULT_MODEL = 'cloudflare/@cf/zai-org/glm-4.7-flash';
@@ -42,6 +42,8 @@ export function MemoOrganizer() {
 	// Streamed to the waiting request as it happens (the model never sees it).
 	const writeProgressData = useDataWriter(PROGRESS_PART, { schema: ProgressSchema });
 	useTool(createSaveMemosTool({ db: env.DB, job, onProgress: writeProgressData }));
+	// Real token usage of this response (all turns), returned to the server for budget accounting.
+	useResponseFinish(({ response }) => ({ usage: { input: response.usage.input, output: response.usage.output } }));
 	return INSTRUCTIONS;
 }
 

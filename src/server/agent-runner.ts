@@ -12,11 +12,17 @@ export interface RunMemoAgentOptions {
 	signal?: AbortSignal;
 }
 
-export type RunMemoAgent = (job: MemoJob, options: RunMemoAgentOptions) => Promise<void>;
+/** Tokens the model really used for one run (from Flue's response usage). */
+export interface TokenUsage {
+	input: number;
+	output: number;
+}
 
-function isSaveProgress(data: unknown): data is { stage: 'found' | 'saving'; count: number } {
+export type RunMemoAgent = (job: MemoJob, options: RunMemoAgentOptions) => Promise<{ usage?: TokenUsage } | void>;
+
+function isSaveProgress(data: unknown): data is { stage: 'found' | 'saving' | 'questions'; count: number } {
 	const d = data as { stage?: unknown; count?: unknown } | null;
-	return !!d && (d.stage === 'found' || d.stage === 'saving') && typeof d.count === 'number';
+	return !!d && (d.stage === 'found' || d.stage === 'saving' || d.stage === 'questions') && typeof d.count === 'number';
 }
 
 /**
@@ -44,7 +50,7 @@ export const runMemoAgent: RunMemoAgent = async (job, { timeoutMs, onProgress, s
 	onProgress?.({ stage: 'analyzing' });
 	const signals = [AbortSignal.timeout(timeoutMs), ...(signal ? [signal] : [])];
 	try {
-		await handle.read(receipt, {
+		const reply = await handle.read(receipt, {
 			signal: AbortSignal.any(signals),
 			onEvent: (chunk) => {
 				if (chunk.type === 'data-part' && chunk.name === PROGRESS_PART && isSaveProgress(chunk.data)) {
@@ -52,6 +58,8 @@ export const runMemoAgent: RunMemoAgent = async (job, { timeoutMs, onProgress, s
 				}
 			},
 		});
+		const usage = (reply.metadata as { usage?: Partial<TokenUsage> } | undefined)?.usage;
+		return usage && Number.isFinite(usage.input) && Number.isFinite(usage.output) ? { usage: { input: usage.input!, output: usage.output! } } : {};
 	} catch (error) {
 		if (error instanceof DOMException && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
 			await handle.abort().catch(() => {});

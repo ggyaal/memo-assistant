@@ -80,7 +80,9 @@ const runAgent: RunMemoAgent = async (job: MemoJob) => {
 	await tool.run({
 		data: {
 			memos: [
-				job.rawText.includes('이제부터 월, 화, 금')
+				job.rawText.includes('3시 회의 확인')
+					? { title: '회의', content: job.rawText, category: 'schedule', due_text: '내일 3시', due_at: '2026-11-16T03:00:00+09:00', reminder_recommended: true }
+					: job.rawText.includes('이제부터 월, 화, 금')
 					? { title: '헬스장 방문 일정 설정', content: '헬스장에서 PT 받기', category: 'todo', due_text: null, due_at: null, reminder_recommended: true, reminder_reason: '매주 아침 운동 스케줄 확인 알림' }
 					: job.rawText.includes('매주 월수금 오후 7시')
 					? { title: '운동', content: job.rawText, category: 'schedule', due_text: '매주 월수금 오후 7시', due_at: '2026-11-16T19:00:00+09:00', reminder_recommended: false }
@@ -721,6 +723,30 @@ describe('personal space: delete any of my memos', () => {
 		expect((await send(`/api/memos/${memo.id}/restore`, { method: 'POST', jar: bob })).status).toBe(404);
 		expect((await send(`/api/memos/${memo.id}/restore`, { method: 'POST', jar })).status).toBe(200);
 		expect((await list(jar))[0]).toMatchObject({ id: memo.id, reminder: null }); // back, reminder stays off
+	});
+});
+
+describe('clarifying questions in a personal space (Discord reminders only after confirming)', () => {
+	const json = { 'content-type': 'application/json' };
+	it('no reminder while the draft waits; a confirmed time gets its reminder; a skipped time gets none', async () => {
+		const send = makeApp();
+		const jar = (await login(send, 'discord', 'alice')).jar;
+		await send('/api/settings/notifications/discord', { method: 'PUT', jar, headers: json, body: JSON.stringify({ enabled: true }) });
+		const organize = async () =>
+			(await (await send('/api/memos', { method: 'POST', jar, headers: json, body: JSON.stringify({ nickname: 'x', text: '내일 3시 회의 확인', requestId: crypto.randomUUID() }) })).json()) as { draft: { id: string } };
+		const reminders = async () => ((await db.prepare("SELECT COUNT(*) AS n FROM notifications WHERE status = 'scheduled'").first<{ n: number }>())?.n ?? 0);
+		const a = await organize();
+		expect(a.draft.id).toBeTruthy();
+		expect(await reminders()).toBe(0); // nothing scheduled for a draft
+		await send(`/api/memo-drafts/${a.draft.id}/commit`, { method: 'POST', jar, headers: json, body: JSON.stringify({ answers: [{ questionId: 'q1', optionId: '15:00' }] }) });
+		expect(await db.prepare("SELECT scheduled_at FROM notifications WHERE status = 'scheduled'").first()).toEqual({ scheduled_at: '2026-11-16T05:30:00.000Z' }); // 15:00 KST - 30 min
+		const b = await organize();
+		await send(`/api/memo-drafts/${b.draft.id}/commit`, { method: 'POST', jar, headers: json, body: JSON.stringify({ answers: [] }) }); // "추가 질문 안 하기"
+		expect(await reminders()).toBe(1); // the undecided time gets no reminder
+		// Another user cannot touch alice's draft.
+		const c = await organize();
+		const bob = (await login(send, 'discord', 'bob')).jar;
+		expect((await send(`/api/memo-drafts/${c.draft.id}/commit`, { method: 'POST', jar: bob, headers: json, body: JSON.stringify({ answers: [] }) })).status).toBe(404);
 	});
 });
 

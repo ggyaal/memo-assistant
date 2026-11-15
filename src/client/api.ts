@@ -1,3 +1,4 @@
+import type { ClarifyAnswer } from '../shared/clarify.ts';
 import { authorKey } from './author.ts';
 import type {
 	AgendaResponse,
@@ -8,6 +9,7 @@ import type {
 	ApiError,
 	CompleteRequest,
 	CreateMemosRequest,
+	CreateMemosDraftResponse,
 	CreateMemosResponse,
 	EditMemoRequest,
 	ListMemosResponse,
@@ -77,7 +79,7 @@ export function createMemos(input: CreateMemosRequest): Promise<CreateMemosRespo
 export async function createMemosWithProgress(
 	input: CreateMemosRequest,
 	options: { onProgress: (event: MemoProgressEvent) => void; signal: AbortSignal },
-): Promise<CreateMemosResponse> {
+): Promise<CreateMemosResponse | CreateMemosDraftResponse> {
 	const cancelled = () => new ApiRequestError('cancelled', '메모 정리를 취소했어요. 입력한 글은 그대로 남아 있어요.', 0);
 	let response: Response;
 	try {
@@ -99,12 +101,12 @@ export async function createMemosWithProgress(
 	}
 	if (!/^text\/event-stream/i.test(response.headers.get('content-type') ?? '') || !response.body) {
 		// Refused before streaming (e.g. 403/413/415) or no stream support: same as the JSON call.
-		const body = (await response.json().catch(() => null)) as CreateMemosResponse | ApiError | null;
+		const body = (await response.json().catch(() => null)) as CreateMemosResponse | CreateMemosDraftResponse | ApiError | null;
 		if (!response.ok) {
 			const error = body as ApiError | null;
 			throw new ApiRequestError(error?.error ?? 'agent_failed', error?.message ?? `요청에 실패했습니다. (HTTP ${response.status})`, response.status);
 		}
-		return body as CreateMemosResponse;
+		return body as CreateMemosResponse | CreateMemosDraftResponse;
 	}
 
 	const reader = response.body.getReader();
@@ -129,6 +131,7 @@ export async function createMemosWithProgress(
 				const payload: unknown = JSON.parse(data);
 				if (event === 'progress') options.onProgress(payload as MemoProgressEvent);
 				else if (event === 'done') return payload as CreateMemosResponse;
+				else if (event === 'draft') return payload as CreateMemosDraftResponse;
 				else if (event === 'error') {
 					const error = payload as MemoStreamError;
 					throw new ApiRequestError(error.error, error.message, error.status);
@@ -309,4 +312,23 @@ export function chooseRecurrence(id: string, choice: 'repeat' | 'once'): Promise
 /** Undo a delete. */
 export function restoreMemo(id: string): Promise<{ memo: Memo | null }> {
 	return request(`/api/memos/${encodeURIComponent(id)}/restore`, { method: 'POST' });
+}
+
+/** A draft waiting for answers (e.g. after a refresh). */
+export function fetchDraft(id: string): Promise<CreateMemosDraftResponse> {
+	return request(`/api/memo-drafts/${encodeURIComponent(id)}`);
+}
+
+/** Save the draft once with the answers so far (skipped questions stay undecided). No AI call. */
+export function commitDraft(id: string, answers: ClarifyAnswer[]): Promise<CreateMemosResponse> {
+	return request(`/api/memo-drafts/${encodeURIComponent(id)}/commit`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({ answers }),
+	});
+}
+
+/** Discard the draft: nothing is saved, no reminder. */
+export function discardDraft(id: string): Promise<{ cancelled: true }> {
+	return request(`/api/memo-drafts/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }

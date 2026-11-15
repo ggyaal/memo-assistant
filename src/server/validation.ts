@@ -290,3 +290,17 @@ export type EditMemoInput = v.InferOutput<typeof EditMemoSchema>;
 export const ReminderToneSchema = v.object({
 	tone: v.picklist(REMINDER_TONES, '알림 말투를 골라 주세요.'),
 });
+
+/** POST /api/memo-drafts/:id/commit — answers to the draft's own questions (unknown ids are ignored). */
+export const DraftCommitSchema = v.object({
+	answers: v.pipe(
+		v.array(
+			v.object({
+				questionId: v.pipe(v.string(), v.maxLength(8)),
+				optionId: v.optional(v.pipe(v.string(), v.maxLength(16))),
+				value: v.optional(v.pipe(v.string(), v.maxLength(16))),
+			}),
+		),
+		v.maxLength(10),
+	),
+});

@@ -57,6 +57,9 @@ export function UsageMeter({ refreshKey }: { refreshKey: number }) {
 				</span>
 				{usage.voice.usedSeconds >= usage.voice.limitSeconds && <span className="error small">오늘 음성 한도 도달</span>}
 			</div>
+			<p className="muted small usage__note" title="예산 %는 요청 전 예상치(글자 수 기반)로 계산하고, 실측은 모델이 실제로 쓴 토큰을 공식 단가로 환산한 값이에요(메모 정리만, 음성 제외).">
+				메모 정리 실측 약 {number.format(usage.today.actualNeurons ?? 0)} Neurons · 예상 {number.format(usage.today.neurons)} / {number.format(usage.today.neuronBudget)}
+			</p>
 			<p className="muted small usage__note">
 				{full ? '오늘 데모의 AI 사용 한도에 도달했습니다. ' : ''}매일 오전 9시(한국 시간)에 초기화됩니다.
 			</p>

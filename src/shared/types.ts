@@ -159,7 +159,9 @@ export interface SettingsResponse {
 export interface UsageResponse {
 	/** UTC day (resets 09:00 KST). `used` counts AI requests the server let through. */
 	/** `neurons`/`neuronBudget`: estimated cost of memo organizing today vs. its daily budget. */
-	today: { used: number; limit: number; resetsAt: string; neurons: number; neuronBudget: number };
+	/** used = AI organize requests; neurons = estimate reserved before each call (budget check);
+	 *  actualNeurons = measured from real token counts after each call (organizing only, not voice). */
+	today: { used: number; limit: number; resetsAt: string; neurons: number; neuronBudget: number; actualNeurons: number };
 	/** All-time AI requests since launch. */
 	total: number;
 	/** Voice-to-text audio seconds today (same UTC day) and the daily budget. */
@@ -189,6 +191,7 @@ export type ApiErrorCode =
 	| 'transcribe_failed'
 	| 'conflict'
 	| 'cancelled'
+	| 'draft_closed'
 	| 'db_error';
 
 export interface ApiError {
@@ -205,7 +208,7 @@ export interface ApiError {
  * - found: save_memos was called with `count` memos (after server sanitizing)
  * - saving: those memos are being written to D1
  */
-export type MemoProgressStage = 'checking' | 'analyzing' | 'found' | 'saving';
+export type MemoProgressStage = 'checking' | 'analyzing' | 'found' | 'saving' | 'questions';
 export interface MemoProgressEvent {
 	stage: MemoProgressStage;
 	count?: number;
@@ -240,4 +243,19 @@ export interface MemoOccurrence {
 	date: string;
 	at: string | null;
 	completed_at: string | null;
+}
+
+/** An organized input waiting for answers to clarifying questions (not saved yet). */
+export interface MemoDraftPayload {
+	id: string;
+	expiresAt: string;
+	/** The original input (kept in the box if the person cancels). */
+	rawText: string;
+	memos: import('./clarify.ts').DraftMemo[];
+	questions: import('./clarify.ts').ClarifyQuestion[];
+}
+
+/** POST /api/memos (or a repeat of it) when some details need the person's answer. */
+export interface CreateMemosDraftResponse {
+	draft: MemoDraftPayload;
 }

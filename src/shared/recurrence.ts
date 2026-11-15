@@ -112,8 +112,9 @@ export function detectRecurrence(dueText: string | null | undefined, today: stri
 		if (!days.length) return { status: 'none' };
 		return { status: 'recurring', rule: { kind: 'weekly', days, interval: 2, start: nextOnOrAfter(today, days) } };
 	}
-	// Several named weekdays ("월 화 금", "월, 화, 금") are read as a weekly routine (user decision 2026-11-15).
-	const routine = named.length >= 2 || ((EVERY_SUFFIX.test(text) || FROM_NOW_ON.test(text)) && days.length > 0);
+	// "~마다" / "이제부터·앞으로" with weekdays = a routine. Several weekdays alone ("월 화 목 운동")
+	// are asked at input time (clarifying question, 2026-11-16 spec) instead of guessing "매주".
+	const routine = (EVERY_SUFFIX.test(text) || FROM_NOW_ON.test(text)) && days.length > 0;
 	const weekQualifier = NEXT_NEXT_WEEK.test(text) || NEXT_WEEK.test(text) || THIS_WEEK.test(text);
 	if (EVERY_WEEK.test(text) || (routine && !weekQualifier)) {
 		if (!days.length) return { status: 'none' }; // "매주" alone: which day is not stated

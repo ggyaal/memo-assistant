@@ -1,14 +1,16 @@
 import { type FormEvent, useEffect, useRef, useState } from 'react';
 import { useSpace } from '../client/space.ts';
-import { ApiRequestError, cancelMemoRequest, createMemosWithProgress } from '../client/api.ts';
+import { ApiRequestError, cancelMemoRequest, createMemosWithProgress, fetchDraft } from '../client/api.ts';
+import { ClarifyCard } from './ClarifyCard.tsx';
 import { OrganizeProgress, type OrganizeStage } from './OrganizeProgress.tsx';
 import { describeSensitive, detectSensitive } from '../shared/privacy.ts';
 import { VoiceRecorder } from './VoiceRecorder.tsx';
-import { LIMITS, type CreateMemosResponse } from '../shared/types.ts';
+import { LIMITS, type CreateMemosResponse, type MemoDraftPayload } from '../shared/types.ts';
 
 const EXAMPLE = '오늘 장 보고, 내일 오후 3시에 병원 예약해야 해. AI 검색 기능 아이디어도 메모해 줘.';
 
 const AUTO_SEND_KEY = 'memo-assistant:voice-auto-send';
+const DRAFT_KEY = 'memo-assistant:open-draft';
 
 /** One-line progress for the folded card (same server-reported steps as the full list). */
 const QUIET_STATUS: Record<OrganizeStage, (count: number | null) => string> = {
@@ -16,6 +18,7 @@ const QUIET_STATUS: Record<OrganizeStage, (count: number | null) => string> = {
 	analyzing: () => 'AI가 메모를 분석하고 있어요…',
 	found: (n) => `메모 ${n ?? ''}개를 발견했어요…`,
 	saving: () => '정리된 메모를 저장하고 있어요…',
+	questions: () => '확인할 내용이 있어요.',
 	done: (n) => `✓ 메모 ${n ?? 0}개를 정리했어요.`,
 };
 
@@ -106,6 +109,7 @@ export function MemoInput({
 		inFlight.current = controller;
 		setPending(true);
 		setError(null);
+		setNotice(null);
 		setProgress(null);
 		try {
 			const result = await createMemosWithProgress(
@@ -116,6 +120,13 @@ export function MemoInput({
 						setProgress((p) => ({ stage: event.stage, count: event.count ?? p?.count ?? null, failed: false })),
 				},
 			);
+			if ('draft' in result) {
+				// Some details need an answer: nothing is saved yet. Keep the text; show the questions (card opens).
+				setQuiet(false);
+				setProgress(null);
+				setDraft(result.draft);
+				return;
+			}
 			pendingRequest.current = null;
 			setText('');
 			setProgress({ stage: 'done', count: result.memos.length, failed: false });
@@ -134,10 +145,45 @@ export function MemoInput({
 		}
 	}
 
+	// Clarifying questions: an organized input waiting for answers (not saved yet).
+	const [draft, setDraft] = useState<MemoDraftPayload | null>(null);
+	const [notice, setNotice] = useState<string | null>(null);
+	// Remember the open draft for this tab, so a refresh can continue it.
+	useEffect(() => {
+		try {
+			if (draft) sessionStorage.setItem(DRAFT_KEY, draft.id);
+			else sessionStorage.removeItem(DRAFT_KEY);
+		} catch {
+			// convenience only
+		}
+	}, [draft]);
+	useEffect(() => {
+		let id: string | null = null;
+		try {
+			id = sessionStorage.getItem(DRAFT_KEY);
+		} catch {
+			return;
+		}
+		if (!id) return;
+		fetchDraft(id)
+			.then(({ draft: d }) => {
+				setDraft(d);
+				setText(d.rawText);
+				setExpanded(true);
+			})
+			.catch(() => {
+				try {
+					sessionStorage.removeItem(DRAFT_KEY);
+				} catch {
+					// ignore
+				}
+			});
+	}, []);
+
 	// "바로 보내기" from the folded card: stay folded and show a one-line status instead (user request).
 	// An error (or text blocked on the public board) still opens it so the text is not lost.
 	const [quiet, setQuiet] = useState(false);
-	const open = expanded || !!error || (!quiet && (pending || !!text.trim() || !!progress));
+	const open = expanded || !!error || !!draft || (!quiet && (pending || !!text.trim() || !!progress));
 	useEffect(() => {
 		if (open && focusWhenOpen.current) {
 			focusWhenOpen.current = false;
@@ -258,9 +304,39 @@ export function MemoInput({
 					⚠️ {describeSensitive(sensitive)}로 보이는 내용이 있어요. 모든 방문자에게 공개되므로 지우고 다시 적어 주세요.
 				</p>
 			)}
-			<button type="submit" className="primary" disabled={pending || voiceBusy || !text.trim() || sensitive.length > 0} aria-busy={pending}>
+			<button type="submit" className="primary" disabled={pending || voiceBusy || !text.trim() || sensitive.length > 0 || !!draft} aria-busy={pending}>
 				{pending ? 'AI가 정리하는 중… (긴 글은 최대 2분)' : 'AI로 정리하기'}
 			</button>
+			{draft && (
+				<ClarifyCard
+					key={draft.id}
+					draft={draft}
+					onSaved={(result) => {
+						setDraft(null);
+						pendingRequest.current = null;
+						setText('');
+						setProgress({ stage: 'done', count: result.memos.length, failed: false });
+						onCreated(result);
+						onSettled?.();
+					}}
+					onDiscarded={() => {
+						// Nothing saved; the text stays so it can be edited and sent again (as a new request).
+						setDraft(null);
+						pendingRequest.current = null;
+						setNotice('저장하지 않았어요. 입력한 글은 그대로 남아 있어요.');
+					}}
+					onExpired={(message) => {
+						setDraft(null);
+						pendingRequest.current = null;
+						setNotice(message);
+					}}
+				/>
+			)}
+			{notice && !draft && (
+				<p className="muted small" role="status">
+					{notice}
+				</p>
+			)}
 			{progress && (
 				<OrganizeProgress
 					stage={progress.stage}

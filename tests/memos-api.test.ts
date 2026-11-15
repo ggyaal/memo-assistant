@@ -918,6 +918,19 @@ describe('POST /api/transcribe (voice → text)', () => {
 });
 
 describe('GET /api/usage', () => {
+	it('records the measured cost of each run from its real token counts (official rates), apart from the estimate', async () => {
+		const runner = toolRunner(db);
+		const app = makeApp(async (job, options) => {
+			await runner(job, options);
+			return { usage: { input: 2000, output: 500 } }; // 2000 × 5.5/1000 + 500 × 36.4/1000 = 29.2 Neurons
+		});
+		await app.request('/api/memos', { method: 'POST', body: body() });
+		await app.request('/api/memos', { method: 'POST', body: body() });
+		const usage = (await (await app.request('/api/usage')).json()) as { today: { actualNeurons: number; neurons: number; used: number } };
+		expect(usage.today).toMatchObject({ used: 2, actualNeurons: 58 }); // 2 × 29.2
+		expect(usage.today.neurons).toBeGreaterThan(usage.today.actualNeurons); // the pre-check estimate stays conservative here
+	});
+
 	type Usage = { today: { used: number; limit: number; resetsAt: string; neurons: number; neuronBudget: number }; total: number };
 	const usage = async (app: ReturnType<typeof makeApp>) => (await (await app.request('/api/usage')).json()) as Usage;
 
@@ -927,7 +940,7 @@ describe('GET /api/usage', () => {
 		expect(res.status).toBe(200);
 		expect(res.headers.get('cache-control')).toBe('no-store');
 		expect(await res.json()).toEqual({
-			today: { used: 0, limit: 150, resetsAt: '2026-11-10T00:00:00.000Z', neurons: 0, neuronBudget: 6000 }, // = 09:00 KST
+			today: { used: 0, limit: 150, resetsAt: '2026-11-10T00:00:00.000Z', neurons: 0, neuronBudget: 6000, actualNeurons: 0 }, // = 09:00 KST
 			total: 0,
 			voice: { usedSeconds: 0, limitSeconds: 1800 },
 		});

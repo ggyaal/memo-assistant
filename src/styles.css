@@ -1762,3 +1762,79 @@ button.danger:disabled {
 	background: var(--bg);
 	border-bottom: 1px solid var(--border);
 }
+
+/* Clarifying questions (before saving) */
+.clarify {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	padding: 12px;
+	border: 1px solid var(--primary);
+	border-radius: 12px;
+	background: var(--bg);
+}
+.clarify__step {
+	margin: 0;
+}
+.clarify__question {
+	margin: 0;
+	font-size: 1rem;
+	line-height: 1.4;
+}
+.clarify__options {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+}
+.clarify__option {
+	min-height: 40px;
+	padding: 8px 14px;
+	border: 1px solid var(--primary);
+	border-radius: 10px;
+	background: var(--surface);
+	color: var(--primary);
+	font: inherit;
+	font-weight: 600;
+	cursor: pointer;
+}
+.clarify__option:hover:not(:disabled) {
+	background: var(--primary);
+	color: var(--primary-text);
+}
+.clarify__picker {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: flex-end;
+	gap: 8px;
+}
+.clarify__picker label {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+.clarify__picker input {
+	width: auto;
+}
+.clarify__actions {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 8px;
+	padding-top: 6px;
+	border-top: 1px dashed var(--border);
+}
+.clarify__preview ul {
+	margin: 4px 0 0;
+	padding: 0;
+	list-style: none;
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	font-size: 0.9rem;
+}
+.clarify__preview li.is-pending {
+	opacity: 0.75;
+}
+.clarify__preview p {
+	margin: 0;
+}

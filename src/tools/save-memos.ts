@@ -1,6 +1,8 @@
 import { defineTool } from '@flue/runtime';
 import * as v from 'valibot';
+import { buildQuestions } from '../shared/clarify.ts';
 import { saveSourceWithMemos } from '../server/db.ts';
+import { saveDraft } from '../server/drafts.ts';
 import { sanitizeMemo, SaveMemosInputSchema } from '../server/validation.ts';
 
 /**
@@ -27,7 +29,7 @@ export type MemoJob = v.InferOutput<typeof MemoJobSchema>;
  * input plus every memo in one atomic batch.
  */
 export interface SaveProgress {
-	stage: 'found' | 'saving';
+	stage: 'found' | 'saving' | 'questions';
 	count: number;
 }
 
@@ -50,6 +52,14 @@ export function createSaveMemosTool(deps: {
 			const singleMemo = data.memos.length === 1;
 			const memos = data.memos.map((memo) => sanitizeMemo(memo, job.rawText, now, { singleMemo }));
 			onProgress?.({ stage: 'found', count: memos.length });
+			// Unclear date / time / repeat: keep a draft and ask the person first (rules, no AI).
+			// Everything clear: saved right away, exactly as before.
+			const questions = buildQuestions(memos, now);
+			if (questions.length > 0) {
+				await saveDraft(db, job, memos, questions, now); // request time (server clock), so expiry matches the server
+				onProgress?.({ stage: 'questions', count: questions.length });
+				return { output: { saved: 0, note: 'Kept as a draft; the user will confirm a few details. Do not call again.' }, terminate: true };
+			}
 			onProgress?.({ stage: 'saving', count: memos.length });
 			const result = await saveSourceWithMemos(
 				db,

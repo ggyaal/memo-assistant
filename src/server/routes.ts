@@ -7,6 +7,7 @@ import type {
 	CalendarResponse,
 	ApiError,
 	ApiErrorCode,
+	CreateMemosDraftResponse,
 	CreateMemosResponse,
 	ListMemosResponse,
 	Memo,
@@ -30,6 +31,7 @@ import {
 	restoreMemo,
 	softDeleteMemo,
 	setOccurrenceDone,
+	saveSourceWithMemos,
 	setRecurrence,
 	listOverdue,
 	updateMemo,
@@ -44,6 +46,7 @@ import {
 	consumeWindow,
 	estimateMemoNeurons,
 	readUsage,
+	recordActualNeurons,
 	voiceSecondsUsed,
 } from './rate-limit.ts';
 import { describeSensitive, detectSensitive } from '../shared/privacy.ts';
@@ -63,6 +66,8 @@ import { type AuthVariables, registerAuthRoutes, resolveAuth } from './auth/rout
 import { sha256Hex } from './auth/crypto.ts';
 import { kstDate, kstDayRangeUtc } from './time.ts';
 import { expand, isOccurrence, loadDone, occurrenceAt, withUpcoming } from './occurrences.ts';
+import { cancelDraft, claimDraft, draftPayload, getDraft, openDraftForRequest, setDraftStatus } from './drafts.ts';
+import { applyAnswers } from '../shared/clarify.ts';
 import { nextOccurrence, type Recurrence, type Weekday } from '../shared/recurrence.ts';
 import {
 	AUDIO_MAX_BYTES,
@@ -80,6 +85,7 @@ import {
 	OccurrenceDoneSchema,
 	RecurrenceChoiceSchema,
 	CancelMemosRequestSchema,
+	DraftCommitSchema,
 	CreateMemosRequestSchema,
 	issuesToMessage,
 	ListMemosQuerySchema,
@@ -117,7 +123,7 @@ type ApiContext = Context<ApiEnv>;
 
 function fail(
 	c: ApiContext,
-	status: 400 | 401 | 403 | 404 | 409 | 413 | 415 | 422 | 429 | 500 | 502 | 503 | 504,
+	status: 400 | 401 | 403 | 404 | 409 | 410 | 413 | 415 | 422 | 429 | 500 | 502 | 503 | 504,
 	error: ApiErrorCode,
 	message: string,
 ) {
@@ -740,7 +746,7 @@ export function createApi(deps: ApiDeps) {
 		// Same work either way; the event stream only adds live progress (sent when each step happens).
 		if (!/\btext\/event-stream\b/i.test(c.req.header('accept') ?? '')) {
 			const outcome = await organizeMemos(c, body);
-			if (outcome.ok) return c.json<CreateMemosResponse>(outcome.body, outcome.status);
+			if (outcome.ok) return c.json(outcome.body, outcome.status);
 			if (outcome.retryAfterSeconds) c.header('Retry-After', String(outcome.retryAfterSeconds));
 			return fail(c, outcome.status as Parameters<typeof fail>[1], outcome.error, outcome.message);
 		}
@@ -752,7 +758,7 @@ export function createApi(deps: ApiDeps) {
 			c.req.raw.signal?.addEventListener('abort', () => cancel.abort());
 			// Keep events in order without making the work wait on the network.
 			let queue = Promise.resolve();
-			const send = (event: 'progress' | 'done' | 'error', data: unknown) => {
+			const send = (event: 'progress' | 'done' | 'draft' | 'error', data: unknown) => {
 				queue = queue.then(() => (cancel.signal.aborted ? undefined : stream.writeSSE({ event, data: JSON.stringify(data) }))).catch(() => {});
 				return queue;
 			};
@@ -761,7 +767,7 @@ export function createApi(deps: ApiDeps) {
 				console.error('memo stream failed', describeError(error));
 				return { ok: false, status: 500, error: 'agent_failed', message: 'AI가 메모를 정리하지 못했습니다. 잠시 후 다시 시도해 주세요.' };
 			});
-			if (outcome.ok) await send('done', outcome.body);
+			if (outcome.ok) await send(outcome.status === 202 ? 'draft' : 'done', outcome.body);
 			else await send('error', { error: outcome.error, message: outcome.message, status: outcome.status, retryAfterSeconds: outcome.retryAfterSeconds } satisfies MemoStreamError);
 		});
 	});
@@ -790,8 +796,82 @@ export function createApi(deps: ApiDeps) {
 		return c.json({ cancelled, saved: false });
 	});
 
+	// ---- Clarifying questions: confirm or discard a draft (answers are applied by rules, no AI) ----
+	api.get('/memo-drafts/:id', async (c) => {
+		const id = v.safeParse(MemoIdSchema, c.req.param('id'));
+		if (!id.success) return fail(c, 400, 'invalid_request', issuesToMessage(id.issues));
+		const draft = await getDraft(c.env.DB, c.get('auth').workspace.id, id.output);
+		if (!draft) return fail(c, 404, 'not_found', '확인할 메모가 없어요.');
+		if (draft.status !== 'open' || Date.parse(draft.expiresAt) <= now().getTime()) {
+			return fail(c, 410, 'draft_closed', draft.status === 'committed' ? '이미 저장된 메모예요.' : '확인 시간이 지났어요. 입력한 글로 다시 정리해 주세요.');
+		}
+		return c.json({ draft: draftPayload(draft) });
+	});
+
+	// Save once: answers so far (skipped or unasked questions stay undecided). Retries return the same result.
+	api.post('/memo-drafts/:id/commit', async (c) => {
+		const blocked = crossSiteBlock(c, true);
+		if (blocked) return blocked;
+		const id = v.safeParse(MemoIdSchema, c.req.param('id'));
+		if (!id.success) return fail(c, 400, 'invalid_request', issuesToMessage(id.issues));
+		const parsed = v.safeParse(DraftCommitSchema, (await readJson(c)) ?? null);
+		if (!parsed.success) return fail(c, 400, 'invalid_request', issuesToMessage(parsed.issues));
+		const current = now();
+		const limited = await mutationLimit(c, current);
+		if (limited) return limited;
+		const { workspace, user } = c.get('auth');
+		const db = c.env.DB;
+		const draft = await getDraft(db, workspace.id, id.output);
+		if (!draft) return fail(c, 404, 'not_found', '확인할 메모가 없어요.');
+		const savedBefore = await findSourceByRequestId(db, workspace.id, draft.requestId).catch(() => null);
+		if (savedBefore) return c.json<CreateMemosResponse>({ duplicate: true, source: savedBefore.source, memos: await withUpcoming(db, savedBefore.memos, current) });
+		if (!(await claimDraft(db, workspace.id, draft.id, current))) {
+			return fail(c, 410, 'draft_closed', draft.status === 'cancelled' ? '취소한 메모예요.' : '확인 시간이 지났어요. 입력한 글로 다시 정리해 주세요.');
+		}
+		try {
+			const memos = applyAnswers(draft.memos, draft.questions, parsed.output.answers, current);
+			await saveSourceWithMemos(
+				db,
+				{
+					id: draft.source.sourceId,
+					workspace_id: workspace.id,
+					nickname: draft.source.nickname,
+					raw_text: draft.source.rawText,
+					request_id: draft.requestId,
+					created_at: draft.source.createdAt,
+					author_key_hash: draft.source.authorKeyHash,
+				},
+				memos.map((m) => ({ ...m })),
+			);
+			await setDraftStatus(db, draft.id, 'committed');
+		} catch (error) {
+			await setDraftStatus(db, draft.id, 'open').catch(() => undefined);
+			console.error('draft commit failed', describeError(error));
+			return fail(c, 500, 'db_error', '저장하지 못했어요. 다시 시도해 주세요.');
+		}
+		const saved = await findSourceByRequestId(db, workspace.id, draft.requestId);
+		if (!saved) return fail(c, 500, 'db_error', '저장하지 못했어요. 다시 시도해 주세요.');
+		// Reminders and the calendar only ever see the confirmed memos.
+		if (user) await autoScheduleRecommended(db, { userId: user.userId, workspaceId: workspace.id }, current).catch(() => 0);
+		const fresh = (await findSourceByRequestId(db, workspace.id, draft.requestId)) ?? saved;
+		return c.json<CreateMemosResponse>({ duplicate: false, source: fresh.source, memos: await withUpcoming(db, fresh.memos, current) }, 201);
+	});
+
+	api.delete('/memo-drafts/:id', async (c) => {
+		const blocked = crossSiteBlock(c, false);
+		if (blocked) return blocked;
+		const id = v.safeParse(MemoIdSchema, c.req.param('id'));
+		if (!id.success) return fail(c, 400, 'invalid_request', issuesToMessage(id.issues));
+		const limited = await mutationLimit(c, now());
+		if (limited) return limited;
+		const cancelled = await cancelDraft(c.env.DB, c.get('auth').workspace.id, id.output);
+		return cancelled ? c.json({ cancelled: true }) : fail(c, 404, 'not_found', '취소할 메모가 없어요.');
+	});
+
 	type OrganizeOutcome =
 		| { ok: true; status: 200 | 201; body: CreateMemosResponse }
+		/** Some details need the person's answer: a draft, nothing saved yet. */
+		| { ok: true; status: 202; body: CreateMemosDraftResponse }
 		| { ok: false; status: number; error: ApiErrorCode; message: string; retryAfterSeconds?: number };
 
 	/** Validate → limits → Flue agent → save_memos → stored result. Shared by the JSON and the streaming response. */
@@ -840,6 +920,9 @@ export function createApi(deps: ApiDeps) {
 			// Idempotency: a retried request returns the stored result without another AI call.
 			const existing = await findSourceByRequestId(db, workspace.id, input.requestId);
 			if (existing) return { ok: true, status: 200, body: { duplicate: true, source: existing.source, memos: existing.memos } };
+			// Same request already waiting for answers (retry, reconnect, double click): no second AI call.
+			const waiting = await openDraftForRequest(db, workspace.id, input.requestId, now());
+			if (waiting) return { ok: true, status: 202, body: { draft: draftPayload(waiting) } };
 			// Cancelled while checking: stop before spending any AI quota.
 			if (signal?.aborted) return failure(499, 'cancelled', '메모 정리를 취소했어요.');
 
@@ -879,8 +962,9 @@ export function createApi(deps: ApiDeps) {
 				.run()
 				.catch((error) => console.error('memo_runs delete failed', describeError(error)));
 
+		const runStarted = Date.now();
 		try {
-			await deps.runAgent(
+			const run = await deps.runAgent(
 				{
 					sourceId: newId(),
 					workspaceId: workspace.id,
@@ -892,11 +976,23 @@ export function createApi(deps: ApiDeps) {
 				},
 				{ timeoutMs, onProgress, signal },
 			);
+			// Real cost of this run (tokens from the model response → Neurons at the official rate).
+			if (run && run.usage) {
+				const neurons = await recordActualNeurons(db, run.usage, now()).catch(() => null);
+				console.log(JSON.stringify({ event: 'ai_usage', kind: 'organize', input: run.usage.input, output: run.usage.output, neurons, ms: Date.now() - runStarted, chars: input.text.length }));
+			}
 		} catch (error) {
 			await settled();
 			const saved = await findSourceByRequestId(db, workspace.id, input.requestId).catch(() => null);
 			if (!saved) {
-				if (signal?.aborted) return failure(499, 'cancelled', '메모 정리를 취소했어요. 저장된 메모는 없어요.');
+				if (signal?.aborted) {
+					// Cancelled: a draft made just before is discarded too (nothing saved, nothing scheduled).
+					const late = await openDraftForRequest(db, workspace.id, input.requestId, now()).catch(() => null);
+					if (late) await cancelDraft(db, workspace.id, late.id).catch(() => false);
+					return failure(499, 'cancelled', '메모 정리를 취소했어요. 저장된 메모는 없어요.');
+				}
+				const draft = await openDraftForRequest(db, workspace.id, input.requestId, now()).catch(() => null);
+				if (draft) return { ok: true, status: 202, body: { draft: draftPayload(draft) } };
 				console.error('agent run failed', describeError(error));
 				const classified = classifyAgentError(error);
 				return failure(classified.status, classified.code, classified.message);
@@ -909,6 +1005,8 @@ export function createApi(deps: ApiDeps) {
 		await settled();
 		const saved = await findSourceByRequestId(db, workspace.id, input.requestId).catch(() => null);
 		if (!saved) {
+			const draft = await openDraftForRequest(db, workspace.id, input.requestId, now()).catch(() => null);
+			if (draft) return { ok: true, status: 202, body: { draft: draftPayload(draft) } };
 			return failure(
 				502,
 				'not_saved',

@@ -42,7 +42,14 @@ function makeApp(run: RunMemoAgent) {
 		app.request(path, { ...init, headers: { 'content-type': 'application/json', 'cf-connecting-ip': '203.0.113.1', ...(init.headers as object) } }, { DB: db, RATE_LIMIT_PER_MINUTE: '100' });
 	return {
 		send,
-		create: async (text: string) => ((await (await send('/api/memos', { method: 'POST', body: JSON.stringify({ nickname: '반복', text, requestId: rid() }) })).json()) as CreateMemosResponse).memos[0],
+		/** Organize; if questions come back, skip them all (save with undecided parts) unless answers are given. */
+		create: async (text: string, answers: object[] = []) => {
+			const body = (await (await send('/api/memos', { method: 'POST', body: JSON.stringify({ nickname: '반복', text, requestId: rid() }) })).json()) as CreateMemosResponse & { draft?: { id: string } };
+			if (!body.draft) return body.memos[0];
+			const committed = await send(`/api/memo-drafts/${body.draft.id}/commit`, { method: 'POST', body: JSON.stringify({ answers }) });
+			return ((await committed.json()) as CreateMemosResponse).memos[0];
+		},
+		organize: async (text: string) => (await (await send('/api/memos', { method: 'POST', body: JSON.stringify({ nickname: '반복', text, requestId: rid() }) })).json()) as { draft?: { id: string; questions: { id: string; kind: string }[] }; memos?: Memo[] },
 		list: async () => ((await (await send('/api/memos?scope=all')).json()) as ListMemosResponse).memos,
 		calendar: async (month: string) => ((await (await send(`/api/calendar?month=${month}`)).json()) as CalendarResponse).memos,
 		agenda: async () => (await (await send('/api/agenda')).json()) as AgendaResponse,
@@ -82,11 +89,16 @@ describe('saving: the server turns the wording into a rule (no AI math)', () => 
 		expect(memo.due_date).toBe('2026-11-23');
 	});
 
-	it('"월수금 운동" is a weekly routine (no question); "평일 아침" is asked', async () => {
-		const weekly = await makeApp(runner({ due_text: '월수금' })).create('월수금 운동');
+	it('"월수금 운동" and "평일 아침" are asked at input time (a draft, nothing saved yet)', async () => {
+		const app = makeApp(runner({ due_text: '월수금' }));
+		const asked = await app.organize('월수금 운동');
+		expect(asked.memos).toBeUndefined();
+		expect(asked.draft?.questions.map((q) => q.kind)).toEqual(['recurrence']);
+		expect(await app.list()).toEqual([]);
+		// Answering "매주 반복" saves the weekly rule.
+		const weekly = await app.create('월수금 운동', [{ questionId: 'q1', optionId: 'repeat' }]);
 		expect(weekly.recurrence).toMatchObject({ kind: 'weekly', days: [0, 2, 4], interval: 1 });
-		expect(weekly.recurrence_question).toBeNull();
-		const memo = await makeApp(runner({ due_text: '평일 아침' })).create('평일 아침 운동');
+		const memo = await makeApp(runner({ due_text: '평일 아침' })).create('평일 아침 운동'); // skipped
 		expect(memo.recurrence).toBeNull();
 		expect(memo.recurrence_question?.repeat).toMatchObject({ kind: 'weekly', days: [0, 1, 2, 3, 4] });
 		expect(memo.recurrence_question?.once).toEqual({ kind: 'dates', dates: ['2026-11-18', '2026-11-19', '2026-11-20', '2026-11-23', '2026-11-24'] });
