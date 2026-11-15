@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { useSpace } from '../client/space.ts';
 import { ApiRequestError, fetchMemos } from '../client/api.ts';
 import { CATEGORY_LABELS } from '../client/format.ts';
 import { MEMO_CATEGORIES, type Memo, type MemoCategory } from '../shared/types.ts';
@@ -7,6 +8,7 @@ import { MemoCard } from './MemoCard.tsx';
 type Scope = 'today' | 'all';
 
 export function MemoList({ refreshKey, onChanged }: { refreshKey: number; onChanged?: () => void }) {
+	const { shared } = useSpace();
 	const [scope, setScope] = useState<Scope>('today');
 	const [category, setCategory] = useState<MemoCategory | ''>('');
 	const [memos, setMemos] = useState<Memo[]>([]);
@@ -47,7 +49,7 @@ export function MemoList({ refreshKey, onChanged }: { refreshKey: number; onChan
 						className={scope === value ? 'tab tab--active' : 'tab'}
 						onClick={() => setScope(value)}
 					>
-						{value === 'today' ? '오늘 등록된 메모' : '전체 공개 메모'}
+						{value === 'today' ? '오늘 등록된 메모' : shared ? '전체 공개 메모' : '전체 메모'}
 					</button>
 				))}
 			</div>
@@ -73,11 +75,18 @@ export function MemoList({ refreshKey, onChanged }: { refreshKey: number; onChan
 				</p>
 			)}
 			{!error && !loading && memos.length === 0 && (
-				<p className="empty muted">{scope === 'today' ? '오늘(한국 시간) 등록된 메모가 아직 없습니다.' : '아직 공개 메모가 없습니다.'}</p>
+				<p className="empty muted">{scope === 'today' ? '오늘(한국 시간) 등록된 메모가 아직 없습니다.' : shared ? '아직 공개 메모가 없습니다.' : '아직 메모가 없습니다. 위에서 첫 메모를 적어 보세요.'}</p>
 			)}
 			<div className="cards">
 				{memos.map((memo) => (
-					<MemoCard key={`${memo.id}:${memo.completed_at ?? ''}`} memo={memo} onChanged={onChanged} />
+					<MemoCard
+						key={`${memo.id}:${memo.completed_at ?? ''}:${memo.reminder?.status ?? ''}:${memo.reminder?.at ?? ''}`}
+						memo={memo}
+						onChanged={() => {
+							void load(null);
+							onChanged?.();
+						}}
+					/>
 				))}
 			</div>
 			{loading && <p className="muted center">불러오는 중…</p>}

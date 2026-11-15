@@ -1,4 +1,5 @@
 import { type FormEvent, useRef, useState } from 'react';
+import { useSpace } from '../client/space.ts';
 import { ApiRequestError, createMemos } from '../client/api.ts';
 import { describeSensitive, detectSensitive } from '../shared/privacy.ts';
 import { VoiceRecorder } from './VoiceRecorder.tsx';
@@ -19,7 +20,9 @@ export function MemoInput({
 	const [text, setText] = useState('');
 	const [pending, setPending] = useState(false);
 	const [error, setError] = useState<{ message: string; retryable: boolean } | null>(null);
-	const sensitive = detectSensitive(text);
+	const { shared } = useSpace();
+	// Only the public guest board blocks contact details; a personal space is private.
+	const sensitive = shared ? detectSensitive(text) : [];
 	const [voiceBusy, setVoiceBusy] = useState(false);
 	const textarea = useRef<HTMLTextAreaElement>(null);
 	// Reused only when retrying the same text, so the server can de-duplicate.
@@ -76,7 +79,7 @@ export function MemoInput({
 			/>
 			<div className="row space-between">
 				<span className="muted small">
-					{text.length}/{LIMITS.textMax}자 · 개인정보 입력 금지
+					{text.length}/{LIMITS.textMax}자 · {shared ? '개인정보 입력 금지(공개됨)' : '나만 보는 공간'}
 				</span>
 				<button type="button" className="link-button small" onClick={() => setText(EXAMPLE)} disabled={pending}>
 					예시 넣기

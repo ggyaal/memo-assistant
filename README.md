@@ -77,6 +77,7 @@ npm run db:migrate:local           # 로컬 D1(.wrangler/)에 스키마 적용
 | 명령 | 설명 |
 |---|---|
 | `npm run dev:offline` | AI 없이 화면·D1·목록 API를 로컬에서 실행합니다. Neuron을 쓰지 않습니다. AI 정리 요청은 오류로 표시됩니다. |
+| `npm run dev:cron` | 로컬 dev 서버의 예약 발송(Cron)을 1분마다 실행합니다. `vite dev`는 Cron을 스스로 돌리지 않으므로, 로컬에서 Discord 알림을 시험할 때 `npm run dev`와 함께 켜 두세요(운영에서는 Cloudflare가 자동 실행). |
 | `npm run dev` | 실제 Workers AI를 호출합니다. **로컬 실행이어도 내 Cloudflare 계정의 무료 Neuron(하루 10,000)을 소모합니다**(1건당 약 36). 계정에 workers.dev 서브도메인이 등록되어 있어야 합니다. |
 
 브라우저에서 http://localhost:5173 을 엽니다.
@@ -88,6 +89,14 @@ npm test              # 단위 + 로컬 D1 통합 + Flue 에이전트(faux 모�
 npm run test:worker   # 빌드한 Worker를 workerd + 로컬 D1에서 실행 (AI 스텁)
 ```
 테스트는 실제 AI를 호출하지 않습니다. 에이전트 테스트는 Pi faux provider로 모델 응답을 스크립트로 정해 두고, 실제 Flue 런타임과 Tool, 로컬 D1을 그대로 실행합니다.
+
+## 로그인 설정 (`feat/auth` 브랜치, 운영 미반영)
+- 첫 화면에서 Google·Discord·카카오로 로그인하면 **나만 보는 개인 공간**, 로그인 없이 시작하면 모두가 함께 쓰는 **「익명의 스케줄」**(기존 공개 메모)이 열립니다.
+- 키가 설정된 공급자만 로그인 버튼이 활성화됩니다(나머지는 "준비 중"). 로컬: `.dev.vars.example`을 `.dev.vars`로 복사해 값 입력. 운영: `npx wrangler secret put DISCORD_CLIENT_ID` 등.
+- 비밀값 이름: `DISCORD_CLIENT_ID`, `DISCORD_CLIENT_SECRET`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `KAKAO_REST_API_KEY`, `KAKAO_CLIENT_SECRET`(선택)
+- 각 개발자 콘솔에 등록할 리디렉션 URI: `http://localhost:5173/api/auth/<provider>/callback`, `https://memo-assistant.ggyaal.workers.dev/api/auth/<provider>/callback`
+- 로그인 후 **⚙️ 설정**: 닉네임 변경, 계정 연결, 알림 받을 경로 토글(Discord DM / 카카오톡·Gmail — 비활성). Discord는 켤 때 **테스트 DM이 실제로 도착해야** 켜집니다(알림 봇과 같은 서버에 있어야 함).
+- **Discord 알림**: AI가 알림을 추천한 개인 메모는 **자동으로 예약**되고(정확한 시각 → 기본 30분 전, 날짜만 있는 메모 → 설정에서 시각을 정한 경우만), **다가오는 알림** 창의 스위치로 끌 수 있습니다(끈 알림은 다시 자동으로 켜지지 않음). 메모 카드에서도 직접 예약할 수 있습니다(정확한 시각이 있으면 정시·10·30·60분 전, 날짜만 있으면 시각을 직접 선택). Cron(1분 간격)이 발송하고, 보내기 직전에 완료·삭제·채널 상태를 다시 확인하며, 같은 알림은 한 번만 보냅니다. 비밀값 `DISCORD_BOT_TOKEN`, 선택 변수 `DISCORD_SERVER_INVITE`.
 
 ## 설정 (환경 변수 이름만 — 비밀값 없음)
 `wrangler.jsonc`의 `vars`로 조정합니다. 비밀값(secret)은 필요하지 않습니다.

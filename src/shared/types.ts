@@ -43,6 +43,8 @@ export interface Memo {
 	manual_rank: number | null;
 	/** When the memo was checked as done (UTC ISO 8601); null = not done. Shared by all visitors. */
 	completed_at: string | null;
+	/** Discord reminder the owner confirmed (personal spaces only); null if none. */
+	reminder: { at: string; status: ReminderStatus; error: string | null } | null;
 	/** When the memo was saved (UTC ISO 8601). Not the schedule time. */
 	created_at: string;
 }
@@ -73,6 +75,15 @@ export interface AgendaResponse {
 	ranked: Memo[];
 }
 
+export type ReminderStatus = 'scheduled' | 'sending' | 'sent' | 'failed';
+
+export interface ReminderRequest {
+	/** For memos with an exact time: 0 (on time), 10, 30 or 60 minutes before. */
+	leadMinutes?: number;
+	/** For date-only memos: the time of day (HH:MM, KST) to be reminded. */
+	time?: string;
+}
+
 export interface CompleteRequest {
 	completed: boolean;
 }
@@ -80,6 +91,26 @@ export interface CompleteRequest {
 export interface ReorderRequest {
 	/** Memo ids in the new top-to-bottom order of the priority list. */
 	ids: string[];
+}
+
+export type NotificationChannel = 'discord' | 'kakao' | 'email';
+
+export interface ChannelStatus {
+	channel: NotificationChannel;
+	label: string;
+	available: boolean;
+	enabled: boolean;
+	/** False until real delivery (bot DM + scheduler) exists. */
+	delivering: boolean;
+	note: string;
+}
+
+export interface SettingsResponse {
+	displayName: string;
+	timezone: string;
+	linked: ('google' | 'discord' | 'kakao')[];
+	notifications: ChannelStatus[];
+	reminderDefaults: { leadMinutes: number; dateOnlyTime: string | null };
 }
 
 export interface UsageResponse {
@@ -104,6 +135,12 @@ export type ApiErrorCode =
 	| 'agent_failed'
 	| 'not_saved'
 	| 'not_found'
+	| 'login_required'
+	| 'channel_unavailable'
+	| 'channel_off'
+	| 'no_deadline'
+	| 'past_time'
+	| 'test_failed'
 	| 'empty_audio'
 	| 'empty_transcript'
 	| 'transcribe_failed'

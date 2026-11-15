@@ -1,5 +1,8 @@
 import type {
 	AgendaResponse,
+	ChannelStatus,
+	NotificationChannel,
+	SettingsResponse,
 	ApiError,
 	CompleteRequest,
 	CreateMemosRequest,
@@ -7,6 +10,7 @@ import type {
 	ListMemosResponse,
 	Memo,
 	MemoCategory,
+	ReminderRequest,
 	ReorderRequest,
 	UsageResponse,
 } from '../shared/types.ts';
@@ -93,5 +97,62 @@ export function transcribeAudio(audio: Blob): Promise<{ text: string }> {
 		method: 'POST',
 		headers: { 'content-type': audio.type || 'audio/webm' },
 		body: audio,
+	});
+}
+
+export type ProviderId = 'google' | 'discord' | 'kakao';
+
+export interface MeResponse {
+	mode: 'guest' | 'user';
+	workspace: { id: string; kind: 'shared_guest' | 'personal'; name: string };
+	user?: { displayName: string; linked: ProviderId[] };
+	providers: Record<ProviderId, { label: string; configured: boolean }>;
+}
+
+export function fetchMe(): Promise<MeResponse> {
+	return request('/api/me');
+}
+
+export function logout(): Promise<{ ok: true }> {
+	return request('/api/auth/logout', { method: 'POST' });
+}
+
+export function fetchSettings(): Promise<SettingsResponse> {
+	return request('/api/settings');
+}
+
+export function updateDisplayName(displayName: string): Promise<{ displayName: string }> {
+	return request('/api/settings/profile', {
+		method: 'PATCH',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({ displayName }),
+	});
+}
+
+export function setNotificationChannel(channel: NotificationChannel, enabled: boolean): Promise<{ status: ChannelStatus }> {
+	return request(`/api/settings/notifications/${channel}`, {
+		method: 'PUT',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({ enabled }),
+	});
+}
+
+export function scheduleReminder(memoId: string, body: ReminderRequest): Promise<{ scheduledAt: string }> {
+	return request(`/api/memos/${encodeURIComponent(memoId)}/reminder`, {
+		method: 'PUT',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify(body),
+	});
+}
+
+export function cancelReminder(memoId: string): Promise<{ canceled: true }> {
+	return request(`/api/memos/${encodeURIComponent(memoId)}/reminder`, { method: 'DELETE' });
+}
+
+export function updateReminderDefaults(body: { leadMinutes: number; dateOnlyTime: string | null }): Promise<{ scheduled: number }> {
+	return request('/api/settings/reminders', {
+		method: 'PATCH',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify(body),
 	});
 }

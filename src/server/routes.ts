@@ -7,6 +7,7 @@ import type {
 	ApiErrorCode,
 	CreateMemosResponse,
 	ListMemosResponse,
+	SettingsResponse,
 	UsageResponse,
 } from '../shared/types.ts';
 import { LIMITS } from '../shared/types.ts';
@@ -31,6 +32,17 @@ import {
 	voiceSecondsUsed,
 } from './rate-limit.ts';
 import { describeSensitive, detectSensitive } from '../shared/privacy.ts';
+import type { AuthEnv } from './auth/providers.ts';
+import { linkedProviders } from './auth/store.ts';
+import {
+	autoScheduleRecommended,
+	cancelReminder,
+	getReminderDefaults,
+	setReminder,
+	setReminderDefaults,
+} from './notify/reminders.ts';
+import { type Channel, CHANNELS, channelStatuses, setChannel, setDisplayName, type SettingsEnv } from './settings.ts';
+import { type AuthVariables, registerAuthRoutes, resolveAuth } from './auth/routes.ts';
 import { kstDate, kstDayRangeUtc } from './time.ts';
 import {
 	AUDIO_MAX_BYTES,
@@ -48,9 +60,13 @@ import {
 	ListMemosQuerySchema,
 	MemoIdSchema,
 	ReorderRequestSchema,
+	ChannelToggleSchema,
+	DisplayNameSchema,
+	ReminderDefaultsSchema,
+	ReminderRequestSchema,
 } from './validation.ts';
 
-export interface ApiBindings {
+export interface ApiBindings extends AuthEnv, SettingsEnv {
 	DB: D1Database;
 	AI?: Ai;
 	RATE_LIMIT_PER_MINUTE?: string;
@@ -64,13 +80,16 @@ export interface ApiDeps {
 	now?: () => Date;
 	newId?: () => string;
 	agentTimeoutMs?: number;
+	/** Used for OAuth token/profile requests; injectable for tests. */
+	fetchFn?: typeof fetch;
 }
 
-type ApiContext = Context<{ Bindings: ApiBindings }>;
+type ApiEnv = { Bindings: ApiBindings; Variables: AuthVariables };
+type ApiContext = Context<ApiEnv>;
 
 function fail(
 	c: ApiContext,
-	status: 400 | 403 | 404 | 409 | 413 | 415 | 422 | 429 | 500 | 502 | 503 | 504,
+	status: 400 | 401 | 403 | 404 | 409 | 413 | 415 | 422 | 429 | 500 | 502 | 503 | 504,
 	error: ApiErrorCode,
 	message: string,
 ) {
@@ -188,7 +207,7 @@ export function createApi(deps: ApiDeps) {
 	// run we already paid for is not thrown away at the deadline.
 	const timeoutMs = deps.agentTimeoutMs ?? 150_000;
 	const transcribe = deps.transcribe ?? whisperTranscriber;
-	const api = new Hono<{ Bindings: ApiBindings }>();
+	const api = new Hono<ApiEnv>();
 
 	// API responses are JSON only: forbid framing, sniffing and any active content.
 	api.use(
@@ -202,6 +221,11 @@ export function createApi(deps: ApiDeps) {
 		await next();
 		c.header('Cache-Control', 'no-store');
 	});
+
+	// Identity and workspace come only from the server-side session cookie.
+	const fetchFn: typeof fetch = deps.fetchFn ?? ((input, init) => fetch(input, init));
+	api.use(resolveAuth(now));
+	registerAuthRoutes(api, { now, fetchFn });
 
 	api.get('/health', (c) => c.json({ ok: true }));
 
@@ -220,8 +244,8 @@ export function createApi(deps: ApiDeps) {
 			const current = now();
 			const today = kstDate(current);
 			const [upcoming, overdue] = await Promise.all([
-				listUpcoming(c.env.DB, current, today),
-				listOverdue(c.env.DB, current, today),
+				listUpcoming(c.env.DB, c.get('auth').workspace.id, current, today),
+				listOverdue(c.env.DB, c.get('auth').workspace.id, current, today),
 			]);
 			return c.json<AgendaResponse>(buildAgenda(upcoming, LIMITS.agendaMax, overdue));
 		} catch (error) {
@@ -289,6 +313,104 @@ export function createApi(deps: ApiDeps) {
 		}
 	});
 
+	// ---- Personal settings (signed-in users only) -----------------------------------------
+	api.get('/settings', async (c) => {
+		const { user } = c.get('auth');
+		if (!user) return fail(c, 401, 'login_required', '로그인이 필요합니다.');
+		const linked = await linkedProviders(c.env.DB, user.userId);
+		return c.json<SettingsResponse>({
+			displayName: user.displayName,
+			timezone: 'Asia/Seoul',
+			linked,
+			notifications: await channelStatuses(c.env.DB, c.env, user.userId, linked),
+			reminderDefaults: await getReminderDefaults(c.env.DB, user.userId),
+		});
+	});
+
+	api.patch('/settings/reminders', async (c) => {
+		const blocked = crossSiteBlock(c, true);
+		if (blocked) return blocked;
+		const { user } = c.get('auth');
+		if (!user) return fail(c, 401, 'login_required', '로그인이 필요합니다.');
+		const parsed = v.safeParse(ReminderDefaultsSchema, (await readJson(c)) ?? null);
+		if (!parsed.success) return fail(c, 400, 'invalid_request', issuesToMessage(parsed.issues));
+		const limited = await mutationLimit(c, now());
+		if (limited) return limited;
+		await setReminderDefaults(c.env.DB, user.userId, parsed.output);
+		// New defaults apply to recommended memos that have no reminder yet.
+		const scheduled = await autoScheduleRecommended(c.env.DB, { userId: user.userId, workspaceId: user.workspace.id }, now());
+		return c.json({ reminderDefaults: parsed.output, scheduled });
+	});
+
+	api.patch('/settings/profile', async (c) => {
+		const blocked = crossSiteBlock(c, true);
+		if (blocked) return blocked;
+		const { user } = c.get('auth');
+		if (!user) return fail(c, 401, 'login_required', '로그인이 필요합니다.');
+		const body = await readJson(c);
+		if (body === undefined) return fail(c, 400, 'invalid_request', 'JSON 형식이 올바르지 않습니다.');
+		const parsed = v.safeParse(DisplayNameSchema, body);
+		if (!parsed.success) return fail(c, 400, 'invalid_request', issuesToMessage(parsed.issues));
+		const limited = await mutationLimit(c, now());
+		if (limited) return limited;
+		await setDisplayName(c.env.DB, user.userId, user.workspace.id, parsed.output.displayName);
+		return c.json({ displayName: parsed.output.displayName });
+	});
+
+	api.put('/settings/notifications/:channel', async (c) => {
+		const blocked = crossSiteBlock(c, true);
+		if (blocked) return blocked;
+		const { user } = c.get('auth');
+		if (!user) return fail(c, 401, 'login_required', '로그인이 필요합니다.');
+		const channel = c.req.param('channel');
+		if (!(CHANNELS as readonly string[]).includes(channel)) return fail(c, 404, 'not_found', '알 수 없는 알림 경로입니다.');
+		const body = await readJson(c);
+		const parsed = v.safeParse(ChannelToggleSchema, body ?? null);
+		if (!parsed.success) return fail(c, 400, 'invalid_request', issuesToMessage(parsed.issues));
+		const limited = await mutationLimit(c, now());
+		if (limited) return limited;
+		const result = await setChannel(c.env.DB, c.env, user.userId, channel as Channel, parsed.output.enabled, now(), fetchFn);
+		const status = (await channelStatuses(c.env.DB, c.env, user.userId)).find((s) => s.channel === channel)!;
+		if (!result.ok) return c.json({ error: result.code === 'unavailable' ? 'channel_unavailable' : 'test_failed', message: result.message, status }, 409);
+		const scheduled =
+			channel === 'discord' && parsed.output.enabled
+				? await autoScheduleRecommended(c.env.DB, { userId: user.userId, workspaceId: user.workspace.id }, now())
+				: 0;
+		return c.json({ status, scheduled });
+	});
+
+	// ---- Reminders (personal memos, Discord DM) -------------------------------------------
+	api.put('/memos/:id/reminder', async (c) => {
+		const blocked = crossSiteBlock(c, true);
+		if (blocked) return blocked;
+		const { user } = c.get('auth');
+		if (!user) return fail(c, 401, 'login_required', '로그인한 개인 공간에서만 알림을 받을 수 있어요.');
+		const id = v.safeParse(MemoIdSchema, c.req.param('id'));
+		if (!id.success) return fail(c, 400, 'invalid_request', issuesToMessage(id.issues));
+		const parsed = v.safeParse(ReminderRequestSchema, (await readJson(c)) ?? null);
+		if (!parsed.success) return fail(c, 400, 'invalid_request', issuesToMessage(parsed.issues));
+		const limited = await mutationLimit(c, now());
+		if (limited) return limited;
+		const result = await setReminder(
+			c.env.DB,
+			{ userId: user.userId, workspaceId: user.workspace.id, memoId: id.output, ...parsed.output },
+			now(),
+		);
+		if (!result.ok) return c.json<ApiError>({ error: result.code as ApiErrorCode, message: result.message }, result.status);
+		return c.json({ scheduledAt: result.scheduledAt });
+	});
+
+	api.delete('/memos/:id/reminder', async (c) => {
+		const blocked = crossSiteBlock(c, false);
+		if (blocked) return blocked;
+		const { user } = c.get('auth');
+		if (!user) return fail(c, 401, 'login_required', '로그인이 필요합니다.');
+		const id = v.safeParse(MemoIdSchema, c.req.param('id'));
+		if (!id.success) return fail(c, 400, 'invalid_request', issuesToMessage(id.issues));
+		const canceled = await cancelReminder(c.env.DB, user.userId, id.output, now());
+		return canceled ? c.json({ canceled: true }) : fail(c, 404, 'not_found', '예약된 알림이 없어요.');
+	});
+
 	// Drag & drop order of the priority list. Shared board: applies to every visitor.
 	api.put('/agenda/order', async (c) => {
 		const blocked = crossSiteBlock(c, true);
@@ -300,7 +422,7 @@ export function createApi(deps: ApiDeps) {
 		try {
 			const limited = await mutationLimit(c, now());
 			if (limited) return limited;
-			const updated = await saveManualOrder(c.env.DB, parsed.output.ids);
+			const updated = await saveManualOrder(c.env.DB, c.get('auth').workspace.id, parsed.output.ids);
 			if (updated === 0) return fail(c, 404, 'not_found', '정렬할 메모를 찾지 못했습니다.');
 			return c.json({ updated });
 		} catch (error) {
@@ -323,7 +445,7 @@ export function createApi(deps: ApiDeps) {
 			const current = now();
 			const limited = await mutationLimit(c, current);
 			if (limited) return limited;
-			const memo = await setCompleted(c.env.DB, id.output, parsed.output.completed, current);
+			const memo = await setCompleted(c.env.DB, c.get('auth').workspace.id, id.output, parsed.output.completed, current);
 			if (!memo) return fail(c, 404, 'not_found', '메모를 찾지 못했습니다.');
 			return c.json({ memo });
 		} catch (error) {
@@ -343,7 +465,7 @@ export function createApi(deps: ApiDeps) {
 			const current = now();
 			const limited = await mutationLimit(c, current);
 			if (limited) return limited;
-			const result = await deleteOverdueMemo(c.env.DB, id.output, current, kstDate(current));
+			const result = await deleteOverdueMemo(c.env.DB, c.get('auth').workspace.id, id.output, current, kstDate(current));
 			if (result === 'not_found') return fail(c, 404, 'not_found', '메모를 찾지 못했습니다.');
 			if (result === 'not_overdue') {
 				return fail(c, 409, 'conflict', '기한이 지났고 완료되지 않은 메모만 삭제할 수 있습니다.');
@@ -361,6 +483,7 @@ export function createApi(deps: ApiDeps) {
 		const q = parsed.output;
 		try {
 			const result = await listMemos(c.env.DB, {
+				workspaceId: c.get('auth').workspace.id,
 				range: q.scope === 'today' ? kstDayRangeUtc(now()) : undefined,
 				category: q.category,
 				nickname: q.nickname || undefined,
@@ -394,9 +517,22 @@ export function createApi(deps: ApiDeps) {
 		if (!parsed.success) return fail(c, 400, 'invalid_request', issuesToMessage(parsed.issues));
 		const input = parsed.output;
 		const db = c.env.DB;
+		const { user, workspace } = c.get('auth');
+		// Signed-in: the author is the account, not whatever the client typed.
+		const nickname = user ? user.displayName : input.nickname;
+		/** Personal space: AI-recommended reminders are scheduled automatically (user can turn them off). */
+		const afterSave = async (saved: NonNullable<Awaited<ReturnType<typeof findSourceByRequestId>>>) => {
+			if (!user) return saved;
+			const added = await autoScheduleRecommended(db, { userId: user.userId, workspaceId: workspace.id }, now()).catch((error) => {
+				console.error('auto reminders failed', describeError(error));
+				return 0;
+			});
+			return added > 0 ? ((await findSourceByRequestId(db, workspace.id, input.requestId).catch(() => null)) ?? saved) : saved;
+		};
 
-		// Public board: refuse obvious personal/secret data before it is stored or sent to the AI.
-		const sensitive = detectSensitive(`${input.nickname}\n${input.text}`);
+		// Shared guest board is public: refuse obvious personal/secret data before it is
+		// stored or sent to the AI. A personal workspace is visible only to its owner.
+		const sensitive = workspace.kind === 'shared_guest' ? detectSensitive(`${nickname}\n${input.text}`) : [];
 		if (sensitive.length > 0) {
 			return fail(
 				c,
@@ -408,7 +544,7 @@ export function createApi(deps: ApiDeps) {
 
 		try {
 			// Idempotency: a retried request returns the stored result without another AI call.
-			const existing = await findSourceByRequestId(db, input.requestId);
+			const existing = await findSourceByRequestId(db, workspace.id, input.requestId);
 			if (existing) {
 				return c.json<CreateMemosResponse>({ duplicate: true, source: existing.source, memos: existing.memos });
 			}
@@ -439,8 +575,9 @@ export function createApi(deps: ApiDeps) {
 			await deps.runAgent(
 				{
 					sourceId: newId(),
+					workspaceId: workspace.id,
 					requestId: input.requestId,
-					nickname: input.nickname,
+					nickname,
 					rawText: input.text,
 					createdAt: now().toISOString(),
 				},
@@ -448,16 +585,17 @@ export function createApi(deps: ApiDeps) {
 			);
 		} catch (error) {
 			console.error('agent run failed', describeError(error));
-			const saved = await findSourceByRequestId(db, input.requestId).catch(() => null);
+			const saved = await findSourceByRequestId(db, workspace.id, input.requestId).catch(() => null);
 			if (!saved) {
 				const classified = classifyAgentError(error);
 				return fail(c, classified.status, classified.code, classified.message);
 			}
 			// The tool already saved everything; a late failure does not lose the result.
-			return c.json<CreateMemosResponse>({ duplicate: false, source: saved.source, memos: saved.memos }, 201);
+			const withReminders = await afterSave(saved);
+			return c.json<CreateMemosResponse>({ duplicate: false, source: withReminders.source, memos: withReminders.memos }, 201);
 		}
 
-		const saved = await findSourceByRequestId(db, input.requestId).catch(() => null);
+		const saved = await findSourceByRequestId(db, workspace.id, input.requestId).catch(() => null);
 		if (!saved) {
 			return fail(
 				c,
@@ -466,7 +604,8 @@ export function createApi(deps: ApiDeps) {
 				'메모로 정리할 내용을 찾지 못했어요. 할 일·일정·떠오른 생각을 한두 문장으로 적어 다시 시도해 주세요. 입력한 글은 그대로 남아 있습니다.',
 			);
 		}
-		return c.json<CreateMemosResponse>({ duplicate: false, source: saved.source, memos: saved.memos }, 201);
+		const withReminders = await afterSave(saved);
+		return c.json<CreateMemosResponse>({ duplicate: false, source: withReminders.source, memos: withReminders.memos }, 201);
 	});
 
 	return api;

@@ -1,7 +1,9 @@
 import { useState } from 'react';
 import { CATEGORY_LABELS, formatDue, formatKst, isOverdue, PRIORITY_LABELS } from '../client/format.ts';
 import type { Memo } from '../shared/types.ts';
+import { useSpace } from '../client/space.ts';
 import { CompleteCheckbox } from './CompleteCheckbox.tsx';
+import { ReminderControl } from './ReminderControl.tsx';
 
 // All model-produced strings are rendered as plain text nodes (never as HTML).
 export function MemoCard({
@@ -14,6 +16,7 @@ export function MemoCard({
 	/** Called after the memo was changed on the board (e.g. checked as done). */
 	onChanged?: () => void;
 }) {
+	const { shared } = useSpace();
 	const [open, setOpen] = useState(false);
 	const [memo, setMemo] = useState(initial);
 	const done = memo.completed_at !== null;
@@ -48,9 +51,10 @@ export function MemoCard({
 				<p className="memo-card__reminder">
 					<span className="badge badge--reminder">알림 추천</span>
 					{memo.reminder_reason && <span className="muted"> {memo.reminder_reason}</span>}
-					<span className="muted small"> (실제 알림은 보내지 않습니다)</span>
+					{shared && <span className="muted small"> (실제 알림은 보내지 않습니다)</span>}
 				</p>
 			)}
+			<ReminderControl memo={memo} onChanged={() => onChanged?.()} />
 			<footer className="memo-card__footer muted small">
 				<span>by {memo.nickname}</span>
 				<span>등록 {formatKst(memo.created_at)}</span>

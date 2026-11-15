@@ -8,7 +8,7 @@ const MIGRATIONS_DIR = join(import.meta.dirname, '..', '..', 'migrations');
 function statements(sql: string): string[] {
 	return sql
 		.split('\n')
-		.filter((line) => !line.trim().startsWith('--'))
+		.map((line) => line.replace(/--.*$/, '')) // our migrations never contain "--" inside strings
 		.join('\n')
 		.split(';')
 		.map((s) => s.trim())

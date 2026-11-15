@@ -1,0 +1,24 @@
+# Copy to `.dev.vars` (git-ignored) for local development. Never commit real values.
+# Production: set each with `npx wrangler secret put <NAME>` instead.
+# A provider is shown on the login screen only when its keys are set.
+#
+# Redirect URIs to register in each developer console:
+#   local:      http://localhost:5173/api/auth/<provider>/callback
+#   production: https://memo-assistant.ggyaal.workers.dev/api/auth/<provider>/callback
+
+# Discord Developer Portal → Applications → OAuth2 (scope used: identify)
+DISCORD_CLIENT_ID=
+DISCORD_CLIENT_SECRET=
+# Same application → Bot → Reset Token. Used only to DM users their own reminders.
+# The bot must share a server with the user (invite it with OAuth2 URL Generator, scope "bot", no permissions).
+DISCORD_BOT_TOKEN=
+# Optional: public invite link to that server, shown to users who cannot receive DMs yet.
+DISCORD_SERVER_INVITE=
+
+# Google Cloud Console → APIs & Services → Credentials → OAuth client (Web) (scopes: openid profile)
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+
+# Kakao Developers → 앱 → REST API 키 / 카카오 로그인 활성화 / (선택) Client Secret (동의항목: profile_nickname)
+KAKAO_REST_API_KEY=
+KAKAO_CLIENT_SECRET=

@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useSpace } from '../client/space.ts';
 import { ApiRequestError, deleteMemo } from '../client/api.ts';
 import { CATEGORY_LABELS, formatDue, overdueLabel } from '../client/format.ts';
 import type { Memo } from '../shared/types.ts';
@@ -9,6 +10,7 @@ import { CompleteCheckbox } from './CompleteCheckbox.tsx';
  * it out; deleting hides it from the shared board for every visitor.
  */
 export function OverdueList({ items, onChanged }: { items: Memo[]; onChanged: () => void }) {
+	const { shared } = useSpace();
 	const [list, setList] = useState(items);
 	const [busy, setBusy] = useState<string | null>(null);
 	const [status, setStatus] = useState<{ text: string; error: boolean } | null>(null);
@@ -16,7 +18,7 @@ export function OverdueList({ items, onChanged }: { items: Memo[]; onChanged: ()
 	useEffect(() => setList(items), [items]);
 
 	async function remove(memo: Memo) {
-		if (!window.confirm(`"${memo.title}"을(를) 삭제할까요?\n모든 방문자의 목록에서 사라집니다.`)) return;
+		if (!window.confirm(`"${memo.title}"을(를) 삭제할까요?\n${shared ? '모든 방문자의 목록에서 사라집니다.' : '내 목록에서 사라집니다.'}`)) return;
 		setBusy(memo.id);
 		setStatus(null);
 		try {

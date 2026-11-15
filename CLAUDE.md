@@ -60,7 +60,10 @@ AX School **Build Your Agent** 과제용으로, 여러 사람이 공개 체험�
 - `POST /api/memos`의 JSON Content-Type 강제와 Origin 검사는 크로스사이트 할당량 소모 방지책이다. 제거하거나 CORS를 열지 않는다. 상태를 바꾸는 새 라우트는 모두 `crossSiteBlock()`과 `mutationLimit()`을 거친다.
 - 공개 게시판 저장 전 `src/shared/privacy.ts`의 `detectSensitive()`로 서버가 거부한다(화면은 같은 함수로 경고만). 새 입력 경로도 같은 검사를 거친다. 감지 규칙을 넓힐 때는 "비밀번호 바꾸기" 같은 일반 메모가 막히지 않는지 `tests/privacy.test.ts`에 추가한다.
 - 음성은 `POST /api/transcribe`(Workers AI Whisper)로 텍스트만 돌려준다. 음성·변환 텍스트를 저장하지 않으며, 사용자가 검토한 뒤 `/api/memos`로 보낸다. 마이크 권한은 `public/_headers`의 `microphone=(self)`.
-- 순서·완료·삭제는 **모든 방문자에게 공유되는 편집**이다(소유 확인 없음, 2026-11-14 사용자 결정). 삭제는 기한 지난 미완료 메모만 숨김(`deleted_at`) 처리하고, 실제 DELETE SQL은 쓰지 않는다. 메모를 읽는 모든 쿼리에 `deleted_at IS NULL`을 넣는다.
+- **공간(workspace) 범위는 서버 세션으로만 정한다**(`src/server/auth/routes.ts`의 `resolveAuth` → `c.get('auth').workspace`). 게스트는 고정 공용 공간 `ws_shared_guest`(「익명의 스케줄」), 로그인 사용자는 개인 공간. 메모를 읽거나 바꾸는 모든 쿼리에 `workspace_id = ?`를 넣고, 다른 공간의 메모는 404로 존재 자체를 숨긴다. 클라이언트가 보낸 user/workspace id는 쓰지 않는다. 새 API는 `tests/auth.test.ts`에 A/B 격리 테스트를 추가한다.
+- 소셜 로그인은 Authorization Code + PKCE(S256) + 브라우저에 묶인 state(쿠키) + 1회용 state(D1, 10분)로 한다. 세션 쿠키는 `__Host-` + HttpOnly + Secure + SameSite=Lax이고, D1에는 토큰의 SHA-256만 저장한다. 공급자 토큰은 저장하지 않는다. 키가 없는 공급자는 "준비 중"으로 표시하고 가짜 값으로 켜지 않는다. 계정은 이메일로 자동으로 합치지 않는다(명시적 연결만).
+- 알림은 사용자가 메모마다 확인한 예약만 보낸다(날짜만 있으면 시각을 사용자가 고름). 발송은 `runDueReminders`(Cron)만 하며, 행 단위 조건부 claim과 발송 직전 재확인을 빼지 않는다. 게스트에게는 개인 알림을 보내지 않는다. 채널은 실제 테스트 메시지가 도착한 뒤에만 켠다.
+- 순서·완료·삭제는 **공용 공간에서는 모든 방문자에게 공유되는 편집**이다(소유 확인 없음, 2026-11-14 사용자 결정). 삭제는 기한 지난 미완료 메모만 숨김(`deleted_at`) 처리하고, 실제 DELETE SQL은 쓰지 않는다. 메모를 읽는 모든 쿼리에 `deleted_at IS NULL`을 넣는다.
 - 에이전트 이름을 바꾸면 Durable Object 클래스명이 바뀐다. `wrangler.jsonc` migrations에 새 태그를 추가하고(`renamed_classes` 등) 기존 항목은 수정하지 않는다. `wrangler.jsonc`를 수정했다면 `npm run cf-typegen`을 다시 실행한다.
 
 ### 실행·검증 명령

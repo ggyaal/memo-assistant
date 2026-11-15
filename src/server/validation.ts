@@ -42,6 +42,29 @@ export const ReorderRequestSchema = v.object({
 	),
 });
 
+export const DisplayNameSchema = v.object({
+	displayName: v.pipe(
+		v.string('닉네임은 문자열이어야 합니다.'),
+		v.transform(cleanText),
+		v.minLength(1, '닉네임을 입력해 주세요.'),
+		v.maxLength(LIMITS.nicknameMax, `닉네임은 ${LIMITS.nicknameMax}자 이하로 입력해 주세요.`),
+	),
+});
+
+export const ReminderRequestSchema = v.object({
+	leadMinutes: v.optional(v.pipe(v.number(), v.integer())),
+	time: v.optional(v.pipe(v.string(), v.regex(/^([01]\d|2[0-3]):[0-5]\d$/, '시각은 HH:MM 형식이어야 해요.'))),
+});
+
+export const ReminderDefaultsSchema = v.object({
+	leadMinutes: v.picklist([0, 10, 30, 60], '기본 알림 시점은 정시·10분·30분·1시간 전 중 하나예요.'),
+	dateOnlyTime: v.nullable(v.pipe(v.string(), v.regex(/^([01]\d|2[0-3]):[0-5]\d$/, '시각은 HH:MM 형식이어야 해요.'))),
+});
+
+export const ChannelToggleSchema = v.object({
+	enabled: v.boolean('enabled는 true 또는 false여야 합니다.'),
+});
+
 export type CreateMemosInput = v.InferOutput<typeof CreateMemosRequestSchema>;
 
 export const ListMemosQuerySchema = v.object({

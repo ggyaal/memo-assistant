@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useSpace } from '../client/space.ts';
 import { ApiRequestError, setMemoCompleted } from '../client/api.ts';
 import type { Memo } from '../shared/types.ts';
 
@@ -13,6 +14,7 @@ export function CompleteCheckbox({
 	memo: Pick<Memo, 'id' | 'title' | 'completed_at'>;
 	onChange: (updated: Memo) => void;
 }) {
+	const { shared } = useSpace();
 	const [done, setDone] = useState(memo.completed_at !== null);
 	const [pending, setPending] = useState(false);
 	const [error, setError] = useState<string | null>(null);
@@ -46,7 +48,7 @@ export function CompleteCheckbox({
 				onMouseDown={(e) => e.stopPropagation()}
 				draggable={false}
 				aria-label={`${memo.title} ${done ? '완료 취소' : '완료로 표시'}`}
-				title={done ? '완료 취소' : '완료로 표시 (모든 방문자에게 적용)'}
+				title={done ? '완료 취소' : shared ? '완료로 표시 (모든 방문자에게 적용)' : '완료로 표시'}
 			/>
 			{error && (
 				<span className="error small" role="alert">

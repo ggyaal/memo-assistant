@@ -614,3 +614,276 @@ button:disabled {
 .voice__note {
 	margin: 0;
 }
+
+/* Landing / account */
+.landing {
+	gap: 12px;
+}
+.landing__title {
+	margin: 0;
+	font-size: 1.15rem;
+}
+.landing__buttons {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+.login-button {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 6px;
+	padding: 12px;
+	border-radius: 10px;
+	border: 1px solid var(--border);
+	background: var(--surface);
+	color: var(--text);
+	font: inherit;
+	font-weight: 600;
+	text-decoration: none;
+	cursor: pointer;
+}
+.login-button--google {
+	background: #ffffff;
+	color: #1f1f1f;
+	border-color: #747775;
+}
+.login-button--discord {
+	background: #5865f2;
+	color: #ffffff;
+	border-color: #5865f2;
+}
+.login-button--kakao {
+	background: #fee500;
+	color: rgba(0, 0, 0, 0.85);
+	border-color: #fee500;
+}
+.login-button--guest {
+	background: var(--bg);
+}
+.login-button.is-disabled {
+	opacity: 0.45;
+	cursor: not-allowed;
+}
+.account-bar {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	justify-content: space-between;
+	gap: 6px 12px;
+}
+.account-bar__links {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 4px 10px;
+}
+.space-badge {
+	font-weight: 700;
+	font-size: 0.9rem;
+}
+.space-badge--personal {
+	color: var(--todo);
+}
+.notice--private {
+	background: color-mix(in srgb, var(--todo) 10%, var(--surface));
+	border-color: color-mix(in srgb, var(--todo) 40%, var(--border));
+}
+.banner {
+	margin: 0;
+	padding: 8px 12px;
+	border-radius: 8px;
+	background: var(--surface);
+	border: 1px solid var(--border);
+}
+
+/* Settings */
+.settings {
+	display: flex;
+	flex-direction: column;
+	gap: 14px;
+}
+.settings__title {
+	margin: 0;
+	font-size: 1.2rem;
+}
+.settings__section h3 {
+	margin: 0;
+	font-size: 1rem;
+}
+.settings__list {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+	display: flex;
+	flex-direction: column;
+}
+.settings__row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	padding: 10px 0;
+	border-top: 1px solid var(--border);
+}
+.settings__row:first-child {
+	border-top: none;
+}
+.settings__row.is-unavailable .settings__channel-label {
+	color: var(--muted);
+}
+.settings__channel {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	min-width: 0;
+}
+.settings__channel-label {
+	font-weight: 600;
+}
+.badge--linked {
+	color: var(--todo);
+}
+.badge--pending {
+	align-self: flex-start;
+	color: var(--reminder);
+}
+/* Toggle switch (native checkbox, no inline styles) */
+.switch {
+	appearance: none;
+	flex: none;
+	width: 44px;
+	height: 24px;
+	border-radius: 999px;
+	background: var(--border);
+	position: relative;
+	cursor: pointer;
+	transition: background 0.15s;
+}
+.switch::after {
+	content: '';
+	position: absolute;
+	top: 3px;
+	left: 3px;
+	width: 18px;
+	height: 18px;
+	border-radius: 999px;
+	background: #ffffff;
+	box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+	transition: transform 0.15s;
+}
+.switch:checked {
+	background: var(--todo);
+}
+.switch:checked::after {
+	transform: translateX(20px);
+}
+.switch:disabled {
+	opacity: 0.4;
+	cursor: not-allowed;
+}
+.switch:focus-visible {
+	outline: 2px solid var(--primary);
+	outline-offset: 2px;
+}
+@media (prefers-reduced-motion: reduce) {
+	.switch,
+	.switch::after {
+		transition: none;
+	}
+}
+.settings__section .row input {
+	flex: 1;
+	min-width: 0;
+}
+.settings__section .row button {
+	flex: none;
+	white-space: nowrap;
+}
+.settings__section p {
+	margin: 0;
+}
+
+/* Reminder control on memo cards */
+.reminder {
+	margin: 6px 0 0;
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+p.reminder {
+	display: block;
+}
+.reminder--scheduled {
+	color: var(--schedule);
+}
+.reminder--sent {
+	color: var(--todo);
+}
+.reminder__form {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 8px;
+}
+.reminder__form input[type='time'] {
+	width: auto;
+	padding: 4px 6px;
+}
+.reminder .error {
+	margin: 0;
+}
+
+.reminder-switch {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	margin-top: 4px;
+}
+.reminder-switch__row {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 8px;
+}
+.reminder-switch__row input[type='time'] {
+	width: auto;
+	padding: 2px 4px;
+}
+.switch--small {
+	width: 36px;
+	height: 20px;
+}
+.switch--small::after {
+	width: 14px;
+	height: 14px;
+}
+.switch--small:checked::after {
+	transform: translateX(16px);
+}
+
+.settings__defaults {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-start;
+	gap: 8px;
+	padding-top: 12px;
+	border-top: 1px solid var(--border);
+}
+.settings__defaults h4 {
+	margin: 0;
+	font-size: 0.95rem;
+}
+.settings__field {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 6px;
+}
+.settings__field input[type='checkbox'] {
+	width: auto;
+}
+.settings__field input[type='time'] {
+	width: auto;
+	padding: 4px 6px;
+}

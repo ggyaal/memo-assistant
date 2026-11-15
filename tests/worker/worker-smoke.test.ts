@@ -51,7 +51,7 @@ beforeAll(async () => {
 		const sql = await readFile(join(ROOT, 'migrations', file), 'utf8');
 		const statements = sql
 			.split('\n')
-			.filter((l) => !l.trim().startsWith('--'))
+			.map((l) => l.replace(/--.*$/, ''))
 			.join('\n')
 			.split(';')
 			.map((s) => s.trim())
@@ -93,6 +93,16 @@ describe('built Worker (workerd + local D1 + Flue Durable Object)', () => {
 		expect(plain.status).toBe(415);
 		const tiny = await mf.dispatchFetch('http://localhost/api/transcribe', { method: 'POST', headers: { 'content-type': 'audio/webm' }, body: new Uint8Array(10) });
 		expect(tiny.status).toBe(422);
+	});
+
+	it('resolves guests to the shared space and refuses unconfigured providers', async () => {
+		const me = (await (await mf.dispatchFetch('http://localhost/api/me')).json()) as { mode: string; workspace: { id: string }; providers: Record<string, { configured: boolean }> };
+		expect(me.mode).toBe('guest');
+		expect(me.workspace.id).toBe('ws_shared_guest');
+		expect(Object.values(me.providers).every((p) => !p.configured)).toBe(true); // no keys in this test
+		const start = await mf.dispatchFetch('http://localhost/api/auth/discord/start', { redirect: 'manual' });
+		expect(start.status).toBe(302);
+		expect(start.headers.get('location')).toBe('/?auth_error=provider_unavailable');
 	});
 
 	it('serves the agenda', async () => {

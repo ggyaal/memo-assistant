@@ -9,6 +9,8 @@ import { sanitizeMemo, SaveMemosInputSchema } from '../server/validation.ts';
  */
 export const MemoJobSchema = v.object({
 	sourceId: v.pipe(v.string(), v.uuid()),
+	/** Decided from the caller's session (guest → shared space). */
+	workspaceId: v.pipe(v.string(), v.minLength(1)),
 	requestId: v.pipe(v.string(), v.uuid()),
 	nickname: v.string(),
 	rawText: v.string(),
@@ -38,6 +40,7 @@ export function createSaveMemosTool(deps: { db: D1Database; job: MemoJob }) {
 				db,
 				{
 					id: job.sourceId,
+					workspace_id: job.workspaceId,
 					nickname: job.nickname,
 					raw_text: job.rawText,
 					request_id: job.requestId,

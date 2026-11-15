@@ -8,6 +8,7 @@
 	"scripts": {
 		"dev": "vite dev",
 		"dev:offline": "MEMO_OFFLINE=1 vite dev",
+		"dev:cron": "node scripts/local-cron.mjs",
 		"build": "vite build",
 		"preview": "vite preview",
 		"check:types": "tsc -p tsconfig.json && tsc -p tsconfig.worker.json",

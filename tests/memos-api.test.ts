@@ -105,6 +105,7 @@ describe('POST /api/memos', () => {
 	it('is idempotent even if the tool runs twice for one request', async () => {
 		const job: MemoJob = {
 			sourceId: crypto.randomUUID(),
+			workspaceId: 'ws_shared_guest',
 			requestId: newRequestId(),
 			nickname: 'n',
 			rawText: RAW,
