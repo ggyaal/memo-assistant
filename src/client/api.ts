@@ -7,6 +7,7 @@ import type {
 	CompleteRequest,
 	CreateMemosRequest,
 	CreateMemosResponse,
+	EditMemoRequest,
 	ListMemosResponse,
 	Memo,
 	MemoCategory,
@@ -125,6 +126,15 @@ export async function createMemosWithProgress(
 	if (options.signal.aborted) throw cancelled();
 	// Stream ended without a result: retrying with the same request id returns it if it was saved.
 	throw new ApiRequestError('network_error', '연결이 끊겨 결과를 받지 못했어요. 다시 시도하면 이어서 확인해요.', 0);
+}
+
+/** Save a person's corrections to one memo. */
+export function updateMemo(id: string, body: EditMemoRequest): Promise<{ memo: Memo }> {
+	return request(`/api/memos/${encodeURIComponent(id)}`, {
+		method: 'PUT',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify(body),
+	});
 }
 
 /** Stop the AI run for one submission (the "취소" button). */

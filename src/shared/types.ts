@@ -73,6 +73,18 @@ export interface AgendaResponse {
 	overdue: Memo[];
 	/** Upcoming dated memos: user-ordered ones first (manual_rank), then by AI priority and how soon they are due. */
 	ranked: Memo[];
+	/** Not-done idea memos, newest first ("아이디어 목록"). */
+	ideas: Memo[];
+}
+
+/** PUT /api/memos/:id — corrections by a person. dueDate is a KST day; dueTime (HH:MM, KST) needs dueDate. */
+export interface EditMemoRequest {
+	title: string;
+	content: string;
+	category: MemoCategory;
+	priority: MemoPriority | null;
+	dueDate: string | null;
+	dueTime: string | null;
 }
 
 export type ReminderStatus = 'scheduled' | 'sending' | 'sent' | 'failed';

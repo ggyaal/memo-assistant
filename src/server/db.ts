@@ -299,3 +299,62 @@ export async function deleteOverdueMemo(
 		.first();
 	return exists ? 'not_overdue' : 'not_found';
 }
+
+export interface MemoEdit {
+	title: string;
+	content: string;
+	category: MemoCategory;
+	priority: MemoPriority | null;
+	/** UTC ISO when a time was given, else null. */
+	due_at: string | null;
+	/** KST day, else null. */
+	due_date: string | null;
+}
+
+/**
+ * Save a person's corrections to one memo in this workspace. When the deadline
+ * changes, the AI's original wording (due_text) no longer describes it and is cleared.
+ * Returns the previous deadline (for reminders) and the updated memo, or null if not found.
+ */
+export async function updateMemo(
+	db: D1Database,
+	workspaceId: string,
+	id: string,
+	edit: MemoEdit,
+): Promise<{ memo: Memo; previousDueAt: string | null; dueChanged: boolean } | null> {
+	const before = await db
+		.prepare('SELECT due_at, due_date FROM memos WHERE id = ? AND workspace_id = ? AND deleted_at IS NULL')
+		.bind(id, workspaceId)
+		.first<{ due_at: string | null; due_date: string | null }>();
+	if (!before) return null;
+	const dueChanged = before.due_at !== edit.due_at || before.due_date !== edit.due_date;
+	await db
+		.prepare(
+			`UPDATE memos SET title = ?, content = ?, category = ?, priority = ?, due_at = ?, due_date = ?,
+			   due_text = CASE WHEN ? THEN NULL ELSE due_text END
+			 WHERE id = ? AND workspace_id = ? AND deleted_at IS NULL`,
+		)
+		.bind(edit.title, edit.content, edit.category, edit.priority, edit.due_at, edit.due_date, dueChanged ? 1 : 0, id, workspaceId)
+		.run();
+	const row = await db.prepare(`${MEMO_SELECT} WHERE m.id = ? AND m.workspace_id = ?`).bind(id, workspaceId).first<MemoRow>();
+	return row ? { memo: toMemo(row), previousDueAt: before.due_at, dueChanged } : null;
+}
+
+/** Not-done ideas, newest first (side panel "아이디어 목록"). */
+export async function listIdeas(db: D1Database, workspaceId: string, max = 20): Promise<Memo[]> {
+	const { results } = await db
+		.prepare(
+			`${MEMO_SELECT}
+			 WHERE m.workspace_id = ? AND m.deleted_at IS NULL AND m.completed_at IS NULL AND m.category = 'idea'
+			 ORDER BY m.created_at DESC, m.position ASC
+			 LIMIT ?`,
+		)
+		.bind(workspaceId, max)
+		.all<MemoRow>();
+	return results.map(toMemo);
+}
+
+export async function getMemo(db: D1Database, workspaceId: string, id: string): Promise<Memo | null> {
+	const row = await db.prepare(`${MEMO_SELECT} WHERE m.id = ? AND m.workspace_id = ? AND m.deleted_at IS NULL`).bind(id, workspaceId).first<MemoRow>();
+	return row ? toMemo(row) : null;
+}

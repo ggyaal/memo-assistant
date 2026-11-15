@@ -716,6 +716,40 @@ describe('reminders: confirm, cancel and deliver (Discord DM)', () => {
 		expect(reminderMessage(memo, null)).toContain('알림이에요');
 	});
 
+	it('editing the deadline moves "N분 전" reminders with it; a clock-time reminder stays; another user cannot edit', async () => {
+		const { send, jar, memo } = await aliceWithMemo(); // due 2026-11-16 15:00 KST
+		await remind(send, jar, memo.id, { leadMinutes: 30 }); // 14:30 KST
+		const put = (j: Jar, change: object) =>
+			send(`/api/memos/${memo.id}`, {
+				method: 'PUT',
+				jar: j,
+				headers: json,
+				body: JSON.stringify({ title: memo.title, content: '보고서 내기', category: 'todo', priority: 'high', dueDate: '2026-11-16', dueTime: '15:00', ...change }),
+			});
+		expect((await put(jar, { dueTime: '17:00' })).status).toBe(200);
+		expect((await list(send, jar))[0].reminder).toMatchObject({ at: '2026-11-16T07:30:00.000Z', status: 'scheduled' }); // 16:30 KST
+		// The person picked an exact clock time → it is not moved.
+		await remind(send, jar, memo.id, { at: '2026-11-16T09:00:00+09:00' });
+		expect((await put(jar, { dueTime: '18:00' })).status).toBe(200);
+		expect((await list(send, jar))[0].reminder).toMatchObject({ at: '2026-11-16T00:00:00.000Z', status: 'scheduled' });
+		// Relative reminder + deadline loses its time → cancelled instead of firing at a stale time.
+		await remind(send, jar, memo.id, { leadMinutes: 10 });
+		expect((await put(jar, { dueTime: null })).status).toBe(200);
+		expect((await list(send, jar))[0].reminder).toBeNull();
+		// Isolation: bob cannot see or edit alice's memo.
+		const bob = (await login(send, 'discord', 'bob')).jar;
+		expect((await put(bob, { title: '바꿈' })).status).toBe(404);
+		expect((await list(send, jar))[0].title).toBe(memo.title);
+	});
+
+	it('a picked time 30 minutes before the memo still says "30분 뒤" in the DM', async () => {
+		const { send, jar, memo } = await aliceWithMemo(); // due 15:00 KST
+		await remind(send, jar, memo.id, { at: '2026-11-16T14:30:00+09:00', channels: ['discord'] });
+		clock = new Date('2026-11-16T05:30:05Z');
+		expect((await run()).sent).toBe(1);
+		expect(sentDms[0].content).toContain('30분 뒤');
+	});
+
 	it('delivers once at the right time, only to the owner, with the memo and time', async () => {
 		const { send, jar, memo } = await aliceWithMemo();
 		await remind(send, jar, memo.id, { leadMinutes: 30 });

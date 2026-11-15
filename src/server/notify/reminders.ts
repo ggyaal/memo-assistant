@@ -43,6 +43,13 @@ function kstLabel(iso: string, withTime: boolean): string {
 	}).format(new Date(iso));
 }
 
+/** Whole minutes from a reminder to the memo's time (for "N분 뒤"), or null if after it / no time. */
+function minutesBefore(dueAt: string | null, scheduledAt: string): number | null {
+	if (!dueAt) return null;
+	const minutes = Math.round((Date.parse(dueAt) - Date.parse(scheduledAt)) / 60_000);
+	return minutes >= 0 ? minutes : null;
+}
+
 export function reminderMessage(memo: { title: string; due_at: string | null; due_date: string | null }, leadMinutes: number | null): string {
 	const title = memo.title.replace(/[\r\n]+/g, ' ').slice(0, 60);
 	if (memo.due_at && leadMinutes !== null && leadMinutes >= 0 && leadMinutes <= 60) {
@@ -96,8 +103,8 @@ export async function setReminder(
 		const at = Date.parse(params.at);
 		if (Number.isNaN(at)) return { ok: false, status: 422, code: 'invalid_request', message: '알림 시각 형식이 올바르지 않아요.' };
 		scheduledAt = new Date(Math.floor(at / 60_000) * 60_000).toISOString();
-		const before = memo.due_at ? Math.round((Date.parse(memo.due_at) - Date.parse(scheduledAt)) / 60_000) : null;
-		lead = before !== null && before >= 0 ? before : null;
+		// A clock time the person chose: it stays put if the deadline is edited later (lead = null).
+		lead = null;
 	} else if (memo.due_at) {
 		if (params.leadMinutes === undefined || !(LEAD_OPTIONS as readonly number[]).includes(params.leadMinutes)) {
 			return { ok: false, status: 422, code: 'invalid_request', message: '알림 시점을 골라 주세요(정시·10분·30분·1시간 전).' };
@@ -253,7 +260,7 @@ export async function runDueReminders(
 			continue;
 		}
 
-		const result = await sendDiscordDm(env.DISCORD_BOT_TOKEN, recipient, reminderMessage(row, row.lead_minutes), fetchFn);
+		const result = await sendDiscordDm(env.DISCORD_BOT_TOKEN, recipient, reminderMessage(row, row.lead_minutes ?? minutesBefore(row.due_at, row.scheduled_at)), fetchFn);
 		if (result.ok) {
 			await finish(db, id, 'sent', null, at);
 			summary.sent++;
@@ -349,4 +356,30 @@ export async function autoScheduleRecommended(
 	if (inserts.length === 0) return 0;
 	const out = await db.batch(inserts);
 	return out.reduce((sum, r) => sum + (r.meta.changes ?? 0), 0);
+}
+
+/**
+ * The deadline of a memo was edited. Reminders set relative to it ("30분 전" etc.,
+ * lead_minutes not null) move with it; if the new time is too close, past, or the
+ * memo has no exact time any more, they are cancelled rather than sent at a stale time.
+ * Reminders the person set to an explicit clock time (lead null) stay as they are.
+ */
+export async function followDeadline(db: D1Database, memoId: string, workspaceId: string, newDueAt: string | null, now: Date): Promise<void> {
+	const { results } = await db
+		.prepare("SELECT id, lead_minutes FROM notifications WHERE memo_id = ? AND workspace_id = ? AND status IN ('scheduled', 'failed') AND lead_minutes IS NOT NULL")
+		.bind(memoId, workspaceId)
+		.all<{ id: string; lead_minutes: number }>();
+	const nowIso = now.toISOString();
+	for (const row of results) {
+		const at = newDueAt ? Date.parse(newDueAt) - row.lead_minutes * 60_000 : NaN;
+		if (Number.isNaN(at) || at < earliestReminderTime(now).getTime()) {
+			await db.prepare("UPDATE notifications SET status = 'canceled', last_error = 'deadline_changed', updated_at = ? WHERE id = ?").bind(nowIso, row.id).run();
+		} else {
+			const iso = new Date(at).toISOString();
+			await db
+				.prepare("UPDATE notifications SET scheduled_at = ?, next_attempt_at = ?, status = 'scheduled', attempts = 0, last_error = NULL, updated_at = ? WHERE id = ?")
+				.bind(iso, iso, nowIso, row.id)
+				.run();
+		}
+	}
 }

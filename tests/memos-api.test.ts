@@ -340,23 +340,65 @@ describe('POST /api/memos with live progress (SSE)', () => {
 		expect(plain.status).toBe(415);
 	});
 
-	it('"취소" stops the agent of that request (protected like other changes); nothing to stop once saved', async () => {
+	it('"취소" stops only a run that is in progress in this space; anything else touches no agent', async () => {
 		const cancelled: string[] = [];
+		let release!: () => void;
+		let started!: () => void;
+		const isStarted = new Promise<void>((r) => (started = r));
+		// A run that waits until released, then saves (like the AI finishing).
+		const runner: RunMemoAgent = async (job, options) => {
+			started();
+			await new Promise<void>((r) => (release = r));
+			await toolRunner(db)(job, options);
+		};
 		const app = new Hono<{ Bindings: ApiBindings }>();
-		app.route('/api', createApi({ runAgent: toolRunner(db), now: () => clock, cancelAgent: async (id) => (cancelled.push(id), true) }));
-		const req = (payload: unknown, headers: Record<string, string> = {}) =>
-			app.request('/api/memos/cancel', { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(payload) }, { DB: db });
+		app.route('/api', createApi({ runAgent: runner, now: () => clock, cancelAgent: async (id) => (cancelled.push(id), true) }));
+		const call = (path: string, payload: unknown, headers: Record<string, string> = {}, ip = '203.0.113.1') =>
+			app.request(path, { method: 'POST', headers: { 'content-type': 'application/json', 'cf-connecting-ip': ip, ...headers }, body: JSON.stringify(payload) }, { DB: db });
+		const cancel = (requestId: string, headers: Record<string, string> = {}) => call('/api/memos/cancel', { requestId }, headers);
+
+		// Unknown request: refused, no agent is touched (nothing gets created).
+		expect((await cancel(newRequestId())).status).toBe(404);
+		expect((await cancel('not-a-uuid')).status).toBe(400);
+		expect(cancelled).toEqual([]);
+
+		// In progress: cancelled.
 		const id = newRequestId();
-		const res = await req({ requestId: id });
+		const pending = call('/api/memos', JSON.parse(body(RAW, id)));
+		await isStarted;
+		expect((await cancel(id, { origin: 'https://evil.example' })).status).toBe(403);
+		const res = await cancel(id);
 		expect(await res.json()).toEqual({ cancelled: true, saved: false });
 		expect(cancelled).toEqual([id]);
-		expect((await req({ requestId: 'not-a-uuid' })).status).toBe(400);
-		expect((await req({ requestId: id }, { origin: 'https://evil.example' })).status).toBe(403);
-		// Finished first: report it as saved instead of pretending to cancel.
-		const done = newRequestId();
-		await app.request('/api/memos', { method: 'POST', headers: { 'content-type': 'application/json' }, body: body(RAW, done) }, { DB: db });
-		expect(await (await req({ requestId: done })).json()).toEqual({ cancelled: false, saved: true });
+
+		// Another space cannot cancel it (the row belongs to the guest space; a different space id never matches).
+		await db.prepare("UPDATE memo_runs SET workspace_id = 'ws_other' WHERE request_id = ?").bind(id).run();
+		expect((await cancel(id)).status).toBe(404);
+		await db.prepare("UPDATE memo_runs SET workspace_id = 'ws_shared_guest' WHERE request_id = ?").bind(id).run();
+
+		// Finished: the in-progress mark is gone and the result is reported as saved.
+		release();
+		expect((await pending).status).toBe(201);
+		expect((await db.prepare('SELECT COUNT(*) AS n FROM memo_runs').first<{ n: number }>())?.n).toBe(0);
+		expect(await (await cancel(id)).json()).toEqual({ cancelled: false, saved: true });
+
+		// A run that ended without saving also leaves no mark.
+		const failing = new Hono<{ Bindings: ApiBindings }>();
+		failing.route('/api', createApi({ runAgent: async () => { throw new Error('boom'); }, now: () => clock }));
+		await failing.request('/api/memos', { method: 'POST', headers: { 'content-type': 'application/json', 'cf-connecting-ip': '203.0.113.9' }, body: body() }, { DB: db });
+		expect((await db.prepare('SELECT COUNT(*) AS n FROM memo_runs').first<{ n: number }>())?.n).toBe(0);
 		expect(cancelled).toEqual([id]);
+	});
+
+	it('a stale in-progress mark (crashed run) does not allow cancelling', async () => {
+		const cancelled: string[] = [];
+		const app = new Hono<{ Bindings: ApiBindings }>();
+		app.route('/api', createApi({ runAgent: toolRunner(db), now: () => clock, agentTimeoutMs: 1000, cancelAgent: async (id) => (cancelled.push(id), true) }));
+		const id = newRequestId();
+		await db.prepare("INSERT INTO memo_runs (request_id, workspace_id, started_at) VALUES (?, 'ws_shared_guest', ?)").bind(id, new Date(clock.getTime() - 10 * 60_000).toISOString()).run();
+		const res = await app.request('/api/memos/cancel', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ requestId: id }) }, { DB: db });
+		expect(res.status).toBe(404);
+		expect(cancelled).toEqual([]);
 	});
 
 	it('closing the stream cancels the AI run; nothing is saved', async () => {
@@ -382,6 +424,82 @@ describe('POST /api/memos with live progress (SSE)', () => {
 		await aborted;
 		expect(saved).toBe(false);
 		expect((await db.prepare('SELECT COUNT(*) AS n FROM sources').first<{ n: number }>())?.n).toBe(0);
+	});
+});
+
+describe('PUT /api/memos/:id (edit an organized memo) and the idea list', () => {
+	type M = CreateMemosResponse['memos'][number];
+	const edit = (app: ReturnType<typeof makeApp>, id: string, payload: object, headers: Record<string, string> = {}) =>
+		app.request(`/api/memos/${id}`, { method: 'PUT', body: JSON.stringify(payload), headers });
+	const full = (m: M, change: object = {}) => ({
+		title: m.title,
+		content: m.content,
+		category: m.category,
+		priority: m.priority,
+		dueDate: m.due_date,
+		dueTime: null,
+		...change,
+	});
+	async function organized(app: ReturnType<typeof makeApp>) {
+		return ((await (await app.request('/api/memos', { method: 'POST', body: body() })).json()) as CreateMemosResponse).memos;
+	}
+
+	it('saves corrections (title, content, category, priority, KST date and time) and lists them', async () => {
+		const app = makeApp(toolRunner(db));
+		const [shopping] = await organized(app);
+		const res = await edit(app, shopping.id, full(shopping, { title: ' 마트 장보기 ', content: '우유, 계란 사기', category: 'schedule', priority: 'high', dueDate: '2026-11-12', dueTime: '18:30' }));
+		expect(res.status).toBe(200);
+		const { memo } = (await res.json()) as { memo: M };
+		expect(memo).toMatchObject({ title: '마트 장보기', content: '우유, 계란 사기', category: 'schedule', priority: 'high', due_date: '2026-11-12', due_at: '2026-11-12T09:30:00.000Z' });
+		// The AI's wording ("오늘") no longer describes the new deadline.
+		expect(memo.due_text).toBeNull();
+		const listed = ((await (await app.request('/api/memos?scope=all')).json()) as ListMemosResponse).memos.find((m) => m.id === shopping.id);
+		expect(listed?.title).toBe('마트 장보기');
+		// Removing the time keeps the day; removing the day removes the deadline.
+		expect(((await (await edit(app, shopping.id, full(memo, { dueTime: null }))).json()) as { memo: M }).memo).toMatchObject({ due_at: null, due_date: '2026-11-12' });
+		expect(((await (await edit(app, shopping.id, full(memo, { dueDate: null, dueTime: null }))).json()) as { memo: M }).memo).toMatchObject({ due_at: null, due_date: null });
+	});
+
+	it('keeps the original due wording when the deadline is untouched', async () => {
+		const app = makeApp(toolRunner(db));
+		const [, hospital] = await organized(app);
+		const res = await edit(app, hospital.id, { ...full(hospital), dueTime: '15:00', title: '병원 예약하기' });
+		expect(((await res.json()) as { memo: M }).memo).toMatchObject({ title: '병원 예약하기', due_text: '내일 오후 3시', due_at: '2026-11-10T06:00:00.000Z' });
+	});
+
+	it.each([
+		['empty title', { title: '  ' }],
+		['too long content', { content: 'x'.repeat(301) }],
+		['unknown category', { category: 'task' }],
+		['time without a date', { dueDate: null, dueTime: '10:00' }],
+		['impossible date', { dueDate: '2026-02-30' }],
+		['bad time', { dueDate: '2026-11-12', dueTime: '24:00' }],
+	])('rejects %s', async (_l, change) => {
+		const app = makeApp(toolRunner(db));
+		const [m] = await organized(app);
+		expect((await edit(app, m.id, full(m, change))).status).toBe(400);
+	});
+
+	it('the public board refuses personal data in edits too; cross-site and unknown memos are refused', async () => {
+		const app = makeApp(toolRunner(db));
+		const [m] = await organized(app);
+		const secret = await edit(app, m.id, full(m, { content: '연락처 010-1234-5678' }));
+		expect(secret.status).toBe(400);
+		expect(((await secret.json()) as { error: string }).error).toBe('sensitive_info');
+		expect((await edit(app, m.id, full(m, { title: 'x' }), { origin: 'https://evil.example' })).status).toBe(403);
+		expect((await edit(app, '00000000-0000-4000-8000-00000000ffff', full(m))).status).toBe(404);
+		expect((await app.request(`/api/memos/${m.id}`, { method: 'PUT', body: '{', headers: {} })).status).toBe(400);
+	});
+
+	it('idea list: not-done ideas, newest first; edits and done checks move memos in and out', async () => {
+		const app = makeApp(toolRunner(db));
+		const [shopping, , idea] = await organized(app);
+		const ideas = async () => ((await (await app.request('/api/agenda')).json()) as { ideas: { title: string }[] }).ideas.map((m) => m.title);
+		expect(await ideas()).toEqual(['AI 검색 기능']);
+		await edit(app, shopping.id, full(shopping, { category: 'idea', title: '장보기 앱 아이디어' }));
+		expect(await ideas()).toEqual(['장보기 앱 아이디어', 'AI 검색 기능']); // same submission: original memo order
+		await app.request(`/api/memos/${idea.id}`, { method: 'PATCH', body: JSON.stringify({ completed: true }) });
+		expect(await ideas()).toEqual(['장보기 앱 아이디어']);
 	});
 });
 
@@ -419,7 +537,7 @@ describe('GET /api/agenda', () => {
 		const res = await makeApp(toolRunner(db)).request('/api/agenda');
 		expect(res.status).toBe(200);
 		expect(res.headers.get('cache-control')).toBe('no-store');
-		expect(await res.json()).toEqual({ reminders: [], ranked: [], overdue: [] });
+		expect(await res.json()).toEqual({ reminders: [], ranked: [], overdue: [], ideas: [] });
 	});
 });
 

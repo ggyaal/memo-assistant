@@ -41,7 +41,7 @@ export function byListOrder(a: Memo, b: Memo): number {
  * - ranked: every upcoming dated memo in list order (see byListOrder).
  * Nothing is sent anywhere; this only orders what is already stored.
  */
-export function buildAgenda(upcoming: Memo[], max: number, overdue: Memo[] = []): AgendaResponse {
+export function buildAgenda(upcoming: Memo[], max: number, overdue: Memo[] = []): Omit<AgendaResponse, 'ideas'> {
 	// A finished task needs no reminder; it stays in the priority list (struck through).
 	const reminders = upcoming.filter((m) => m.reminder_recommended && !m.completed_at).sort(bySoonest).slice(0, max);
 	const ranked = [...upcoming].sort(byListOrder).slice(0, max);

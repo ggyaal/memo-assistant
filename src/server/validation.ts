@@ -184,3 +184,26 @@ export function issuesToMessage(issues: v.BaseIssue<unknown>[]): string {
 
 /** POST /api/memos/cancel — the request id the client generated for that submission. */
 export const CancelMemosRequestSchema = v.object({ requestId: v.pipe(v.string(), v.uuid()) });
+
+const DATE_RE = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
+const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+/** PUT /api/memos/:id — a person correcting an organized memo. Date/time are KST. */
+export const EditMemoSchema = v.pipe(
+	v.object({
+		title: v.pipe(v.string(), v.trim(), v.minLength(1, '제목을 입력해 주세요.'), v.maxLength(LIMITS.titleMax, `제목은 ${LIMITS.titleMax}자 이하로 입력해 주세요.`)),
+		content: v.pipe(v.string(), v.trim(), v.minLength(1, '내용을 입력해 주세요.'), v.maxLength(LIMITS.contentMax, `내용은 ${LIMITS.contentMax}자 이하로 입력해 주세요.`)),
+		category: v.picklist(MEMO_CATEGORIES, '분류를 골라 주세요.'),
+		priority: v.nullable(v.picklist(MEMO_PRIORITIES, '중요도를 골라 주세요.')),
+		dueDate: v.nullable(
+			v.pipe(
+				v.string(),
+				v.regex(DATE_RE, '날짜는 YYYY-MM-DD 형식이어야 해요.'),
+				v.check((d) => !Number.isNaN(Date.parse(`${d}T00:00:00+09:00`)) && new Date(`${d}T00:00:00Z`).toISOString().startsWith(d), '없는 날짜예요.'),
+			),
+		),
+		dueTime: v.nullable(v.pipe(v.string(), v.regex(TIME_RE, '시각은 HH:MM 형식이어야 해요.'))),
+	}),
+	v.check((m) => m.dueTime === null || m.dueDate !== null, '시각을 정하려면 날짜도 골라 주세요.'),
+);
+export type EditMemoInput = v.InferOutput<typeof EditMemoSchema>;

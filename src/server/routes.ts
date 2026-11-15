@@ -20,7 +20,10 @@ import {
 	deleteOverdueMemo,
 	findSourceByRequestId,
 	listMemos,
+	getMemo,
+	listIdeas,
 	listOverdue,
+	updateMemo,
 	listUpcoming,
 	saveManualOrder,
 	setCompleted,
@@ -39,6 +42,7 @@ import type { AuthEnv } from './auth/providers.ts';
 import { linkedProviders } from './auth/store.ts';
 import {
 	autoScheduleRecommended,
+	followDeadline,
 	cancelReminder,
 	getReminderDefaults,
 	setReminder,
@@ -58,6 +62,7 @@ import {
 } from './transcribe.ts';
 import {
 	CompleteRequestSchema,
+	EditMemoSchema,
 	CancelMemosRequestSchema,
 	CreateMemosRequestSchema,
 	issuesToMessage,
@@ -249,11 +254,12 @@ export function createApi(deps: ApiDeps) {
 		try {
 			const current = now();
 			const today = kstDate(current);
-			const [upcoming, overdue] = await Promise.all([
+			const [upcoming, overdue, ideas] = await Promise.all([
 				listUpcoming(c.env.DB, c.get('auth').workspace.id, current, today),
 				listOverdue(c.env.DB, c.get('auth').workspace.id, current, today),
+				listIdeas(c.env.DB, c.get('auth').workspace.id, LIMITS.agendaMax),
 			]);
-			return c.json<AgendaResponse>(buildAgenda(upcoming, LIMITS.agendaMax, overdue));
+			return c.json<AgendaResponse>({ ...buildAgenda(upcoming, LIMITS.agendaMax, overdue), ideas });
 		} catch (error) {
 			console.error('agenda failed', describeError(error));
 			return fail(c, 500, 'db_error', '다가오는 일정을 불러오지 못했습니다.');
@@ -460,6 +466,48 @@ export function createApi(deps: ApiDeps) {
 		}
 	});
 
+	// A person correcting an organized memo (title, content, category, priority, deadline).
+	// Shared board: like done/order/delete, the change is visible to every visitor.
+	api.put('/memos/:id', async (c) => {
+		const blocked = crossSiteBlock(c, true);
+		if (blocked) return blocked;
+		const id = v.safeParse(MemoIdSchema, c.req.param('id'));
+		if (!id.success) return fail(c, 400, 'invalid_request', issuesToMessage(id.issues));
+		const body = await readJson(c);
+		if (body === undefined) return fail(c, 400, 'invalid_request', 'JSON 형식이 올바르지 않습니다.');
+		const parsed = v.safeParse(EditMemoSchema, body);
+		if (!parsed.success) return fail(c, 400, 'invalid_request', issuesToMessage(parsed.issues));
+		const input = parsed.output;
+		const { workspace } = c.get('auth');
+		// Same rule as new input: the public board refuses personal/secret data.
+		const sensitive = workspace.kind === 'shared_guest' ? detectSensitive(`${input.title}\n${input.content}`) : [];
+		if (sensitive.length > 0) {
+			return fail(c, 400, 'sensitive_info', `모든 방문자에게 공개되는 메모라 ${describeSensitive(sensitive)}로 보이는 내용은 저장할 수 없어요.`);
+		}
+		try {
+			const current = now();
+			const limited = await mutationLimit(c, current);
+			if (limited) return limited;
+			const dueAt = input.dueDate && input.dueTime ? new Date(`${input.dueDate}T${input.dueTime}:00+09:00`).toISOString() : null;
+			const result = await updateMemo(c.env.DB, workspace.id, id.output, {
+				title: input.title,
+				content: input.content,
+				category: input.category,
+				priority: input.priority,
+				due_at: dueAt,
+				due_date: input.dueDate,
+			});
+			if (!result) return fail(c, 404, 'not_found', '메모를 찾지 못했습니다.');
+			if (!result.dueChanged) return c.json({ memo: result.memo });
+			await followDeadline(c.env.DB, id.output, workspace.id, dueAt, current);
+			// Re-read so the reminder shown on the card matches what was rescheduled.
+			return c.json({ memo: (await getMemo(c.env.DB, workspace.id, id.output)) ?? result.memo });
+		} catch (error) {
+			console.error('edit failed', describeError(error));
+			return fail(c, 500, 'db_error', '메모를 저장하지 못했습니다.');
+		}
+	});
+
 	// Remove an item from "지나버린 일". Soft delete, overdue + not-done only.
 	// Shared board: the memo disappears for every visitor.
 	api.delete('/memos/:id', async (c) => {
@@ -558,11 +606,18 @@ export function createApi(deps: ApiDeps) {
 		const limited = await mutationLimit(c, now());
 		if (limited) return limited;
 		const { workspace } = c.get('auth');
+		const { requestId } = parsed.output;
 		// Already saved (finished first): nothing to stop; the retry returns that result.
-		if (await findSourceByRequestId(c.env.DB, workspace.id, parsed.output.requestId).catch(() => null)) {
+		if (await findSourceByRequestId(c.env.DB, workspace.id, requestId).catch(() => null)) {
 			return c.json({ cancelled: false, saved: true });
 		}
-		const cancelled = await (deps.cancelAgent ?? (async () => false))(parsed.output.requestId);
+		// Only a run that is in progress right now, in this space. Never touches (or creates) any other agent instance.
+		const running = await c.env.DB.prepare('SELECT 1 AS ok FROM memo_runs WHERE request_id = ? AND workspace_id = ? AND started_at >= ?')
+			.bind(requestId, workspace.id, new Date(now().getTime() - timeoutMs - 60_000).toISOString())
+			.first<{ ok: number }>()
+			.catch(() => null);
+		if (!running) return fail(c, 404, 'not_found', '진행 중인 정리 요청이 없어요.');
+		const cancelled = await (deps.cancelAgent ?? (async () => false))(requestId);
 		return c.json({ cancelled, saved: false });
 	});
 
@@ -640,6 +695,21 @@ export function createApi(deps: ApiDeps) {
 			return failure(500, 'db_error', '저장소에 접근하지 못했습니다.');
 		}
 
+		// Mark the run as in progress (for "취소"); stale rows from crashed runs are cleared here too.
+		const startedAt = now().toISOString();
+		await db
+			.batch([
+				db.prepare('DELETE FROM memo_runs WHERE started_at < ?').bind(new Date(now().getTime() - 3600_000).toISOString()),
+				db.prepare('INSERT OR REPLACE INTO memo_runs (request_id, workspace_id, started_at) VALUES (?, ?, ?)').bind(input.requestId, workspace.id, startedAt),
+			])
+			.catch((error) => console.error('memo_runs insert failed', describeError(error)));
+		const settled = () =>
+			db
+				.prepare('DELETE FROM memo_runs WHERE request_id = ?')
+				.bind(input.requestId)
+				.run()
+				.catch((error) => console.error('memo_runs delete failed', describeError(error)));
+
 		try {
 			await deps.runAgent(
 				{
@@ -653,6 +723,7 @@ export function createApi(deps: ApiDeps) {
 				{ timeoutMs, onProgress, signal },
 			);
 		} catch (error) {
+			await settled();
 			const saved = await findSourceByRequestId(db, workspace.id, input.requestId).catch(() => null);
 			if (!saved) {
 				if (signal?.aborted) return failure(499, 'cancelled', '메모 정리를 취소했어요. 저장된 메모는 없어요.');
@@ -665,6 +736,7 @@ export function createApi(deps: ApiDeps) {
 			return { ok: true, status: 201, body: { duplicate: false, source: withReminders.source, memos: withReminders.memos } };
 		}
 
+		await settled();
 		const saved = await findSourceByRequestId(db, workspace.id, input.requestId).catch(() => null);
 		if (!saved) {
 			return failure(

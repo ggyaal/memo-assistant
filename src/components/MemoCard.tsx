@@ -1,8 +1,9 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { CATEGORY_LABELS, formatDue, formatKst, isOverdue, PRIORITY_LABELS } from '../client/format.ts';
 import type { Memo } from '../shared/types.ts';
 import { useSpace } from '../client/space.ts';
 import { CompleteCheckbox } from './CompleteCheckbox.tsx';
+import { MemoEditForm } from './MemoEditForm.tsx';
 import { ReminderControl } from './ReminderControl.tsx';
 
 // All model-produced strings are rendered as plain text nodes (never as HTML).
@@ -19,7 +20,25 @@ export function MemoCard({
 	const { shared } = useSpace();
 	const [open, setOpen] = useState(false);
 	const [memo, setMemo] = useState(initial);
+	const [editing, setEditing] = useState(false);
+	// A refreshed list (e.g. after an edit elsewhere) brings the stored version.
+	useEffect(() => setMemo(initial), [initial]);
 	const done = memo.completed_at !== null;
+	if (editing) {
+		return (
+			<article className={`memo-card memo-card--${memo.category} is-editing`}>
+				<MemoEditForm
+					memo={memo}
+					onCancel={() => setEditing(false)}
+					onSaved={(saved) => {
+						setMemo(saved);
+						setEditing(false);
+						onChanged?.();
+					}}
+				/>
+			</article>
+		);
+	}
 	return (
 		<article className={`memo-card memo-card--${memo.category}${done ? ' is-done' : ''}`}>
 			<header className="memo-card__header">
@@ -59,6 +78,9 @@ export function MemoCard({
 				<span>by {memo.nickname}</span>
 				<span>등록 {formatKst(memo.created_at)}</span>
 				{done && memo.completed_at && <span>완료 {formatKst(memo.completed_at)}</span>}
+				<button type="button" className="link-button" onClick={() => setEditing(true)}>
+					✏️ 수정
+				</button>
 				{showSource && (
 					<button type="button" className="link-button" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
 						{open ? '원문 닫기' : '원문 보기'}
