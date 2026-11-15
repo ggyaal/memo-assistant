@@ -4,7 +4,7 @@ import { pkceChallenge, sha256Hex } from '../src/server/auth/crypto.ts';
 import type { RunMemoAgent } from '../src/server/agent-runner.ts';
 import { createApi, type ApiBindings } from '../src/server/routes.ts';
 import { createSaveMemosTool, type MemoJob } from '../src/tools/save-memos.ts';
-import { runDueReminders } from '../src/server/notify/reminders.ts';
+import { CRON_LOOKAHEAD_MS, runDueReminders } from '../src/server/notify/reminders.ts';
 import { createTestD1 } from './helpers/d1.ts';
 
 /*
@@ -626,6 +626,57 @@ describe('reminders: confirm, cancel and deliver (Discord DM)', () => {
 		const { send: s2, jar: j2, memo: m2 } = await aliceWithMemo('carol');
 		await s2('/api/settings/notifications/discord', { method: 'PUT', jar: j2, headers: json, body: JSON.stringify({ enabled: false }) });
 		expect(((await (await remind(s2, j2, m2.id, { leadMinutes: 0 })).json()) as { error: string }).error).toBe('channel_off');
+	});
+
+	it('a cron run that comes before the due time waits and sends exactly on the minute', async () => {
+		const { send, jar, memo } = await aliceWithMemo();
+		await remind(send, jar, memo.id, { leadMinutes: 30 }); // due 05:30:00Z
+		// Production cron fires about 50 s into each minute.
+		clock = new Date('2026-11-16T05:29:50Z');
+		const waits: number[] = [];
+		const sentAt: string[] = [];
+		const timing = {
+			lookaheadMs: CRON_LOOKAHEAD_MS,
+			clock: () => clock,
+			sleep: async (ms: number) => {
+				waits.push(ms);
+				clock = new Date(clock.getTime() + ms);
+			},
+		};
+		const recordingFetch: typeof fetch = async (input, init) => {
+			if (String(input).endsWith('/messages')) sentAt.push(clock.toISOString());
+			return fakeFetch(input, init);
+		};
+		expect(await runDueReminders({ DB: db, DISCORD_BOT_TOKEN: 'bot-token' }, clock, recordingFetch, 10, timing)).toEqual({ sent: 1, retried: 0, failed: 0, canceled: 0 });
+		expect(waits).toEqual([10_000]);
+		expect(sentAt).toEqual(['2026-11-16T05:30:00.000Z']);
+		expect((await list(send, jar))[0].reminder?.status).toBe('sent');
+	});
+
+	it('looks ahead only one run: later reminders wait for their own run', async () => {
+		const { send, jar, memo } = await aliceWithMemo();
+		await remind(send, jar, memo.id, { leadMinutes: 30 }); // due 05:30:00Z
+		clock = new Date('2026-11-16T05:28:50Z'); // 70 s early: beyond the look-ahead
+		const sleeps: number[] = [];
+		const timing = { lookaheadMs: CRON_LOOKAHEAD_MS, clock: () => clock, sleep: async (ms: number) => void sleeps.push(ms) };
+		expect((await runDueReminders({ DB: db, DISCORD_BOT_TOKEN: 'bot-token' }, clock, fakeFetch, 10, timing)).sent).toBe(0);
+		expect(sleeps).toEqual([]);
+	});
+
+	it('turning a reminder off while the run waits for its minute means it is not sent', async () => {
+		const { send, jar, memo } = await aliceWithMemo();
+		await remind(send, jar, memo.id, { leadMinutes: 30 });
+		clock = new Date('2026-11-16T05:29:50Z');
+		const timing = {
+			lookaheadMs: CRON_LOOKAHEAD_MS,
+			clock: () => clock,
+			sleep: async (ms: number) => {
+				expect((await send(`/api/memos/${memo.id}/reminder`, { method: 'DELETE', jar })).status).toBe(200);
+				clock = new Date(clock.getTime() + ms);
+			},
+		};
+		expect((await runDueReminders({ DB: db, DISCORD_BOT_TOKEN: 'bot-token' }, clock, fakeFetch, 10, timing)).sent).toBe(0);
+		expect(sentDms).toHaveLength(0);
 	});
 
 	it('delivers once at the right time, only to the owner, with the memo and time', async () => {

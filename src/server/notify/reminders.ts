@@ -142,23 +142,54 @@ async function finish(db: D1Database, id: string, status: 'sent' | 'failed' | 'c
  * conditional UPDATE (scheduled → sending), so overlapping runs never send twice.
  * Everything is re-checked right before sending.
  */
-export async function runDueReminders(env: NotifyEnv, now: Date, fetchFn: typeof fetch, max = 10): Promise<DispatchSummary> {
+/**
+ * Send on the minute, not when the cron happens to run.
+ * Cloudflare runs a "* * * * *" trigger at a fixed offset inside each minute (seen in
+ * production: about :50), so a reminder due at 15:00:00 was found only at 15:00:50.
+ * With `lookaheadMs`, a run also picks reminders due before the next run and waits
+ * (no CPU used) until each one is due. Nothing is claimed while waiting, so a reminder
+ * the user turns off in the meantime is not sent; the claim still prevents duplicates.
+ */
+export interface DispatchTiming {
+	lookaheadMs: number;
+	/** Current time after waiting. */
+	clock: () => Date;
+	sleep: (ms: number) => Promise<void>;
+}
+
+export const CRON_LOOKAHEAD_MS = 60_000;
+
+export async function runDueReminders(
+	env: NotifyEnv,
+	now: Date,
+	fetchFn: typeof fetch,
+	max = 10,
+	timing?: DispatchTiming,
+): Promise<DispatchSummary> {
 	const db = env.DB;
-	const nowIso = now.toISOString();
+	const startIso = now.toISOString();
 	const summary: DispatchSummary = { sent: 0, retried: 0, failed: 0, canceled: 0 };
 
 	// Unknown outcome (crash mid-send): give up rather than risk a duplicate DM.
 	await db
 		.prepare("UPDATE notifications SET status = 'failed', last_error = 'unknown_outcome', updated_at = ? WHERE status = 'sending' AND updated_at <= ?")
-		.bind(nowIso, new Date(now.getTime() - STUCK_SENDING_MS).toISOString())
+		.bind(startIso, new Date(now.getTime() - STUCK_SENDING_MS).toISOString())
 		.run();
 
+	const horizon = new Date(now.getTime() + (timing?.lookaheadMs ?? 0)).toISOString();
 	const { results: due } = await db
-		.prepare("SELECT id FROM notifications WHERE status = 'scheduled' AND next_attempt_at <= ? ORDER BY next_attempt_at LIMIT ?")
-		.bind(nowIso, max)
-		.all<{ id: string }>();
+		.prepare("SELECT id, next_attempt_at FROM notifications WHERE status = 'scheduled' AND next_attempt_at <= ? ORDER BY next_attempt_at LIMIT ?")
+		.bind(horizon, max)
+		.all<{ id: string; next_attempt_at: string }>();
 
-	for (const { id } of due) {
+	for (const { id, next_attempt_at } of due) {
+		// Wait for the exact time (ordered, so each wait is short); then re-check everything as of then.
+		if (timing) {
+			const wait = Date.parse(next_attempt_at) - timing.clock().getTime();
+			if (wait > 0) await timing.sleep(wait);
+		}
+		const at = timing ? timing.clock() : now;
+		const nowIso = at.toISOString();
 		const claim = await db
 			.prepare("UPDATE notifications SET status = 'sending', attempts = attempts + 1, updated_at = ? WHERE id = ? AND status = 'scheduled'")
 			.bind(nowIso, id)
@@ -180,40 +211,40 @@ export async function runDueReminders(env: NotifyEnv, now: Date, fetchFn: typeof
 				title: string; due_at: string | null; due_date: string | null; completed_at: string | null; deleted_at: string | null; owned: number;
 			}>();
 		if (!row || !row.owned || row.deleted_at || row.completed_at) {
-			await finish(db, id, 'canceled', row?.completed_at ? 'memo_completed' : 'memo_unavailable', now);
+			await finish(db, id, 'canceled', row?.completed_at ? 'memo_completed' : 'memo_unavailable', at);
 			summary.canceled++;
 			continue;
 		}
-		if (now.getTime() - Date.parse(row.scheduled_at) > TOO_LATE_MS) {
-			await finish(db, id, 'failed', 'too_late', now);
+		if (at.getTime() - Date.parse(row.scheduled_at) > TOO_LATE_MS) {
+			await finish(db, id, 'failed', 'too_late', at);
 			summary.failed++;
 			continue;
 		}
 		const recipient = await discordRecipient(db, row.user_id);
 		if (!recipient || !(await discordReady(db, row.user_id))) {
-			await finish(db, id, 'canceled', 'channel_off', now);
+			await finish(db, id, 'canceled', 'channel_off', at);
 			summary.canceled++;
 			continue;
 		}
 		if (!env.DISCORD_BOT_TOKEN) {
-			await finish(db, id, 'failed', 'bot_not_configured', now);
+			await finish(db, id, 'failed', 'bot_not_configured', at);
 			summary.failed++;
 			continue;
 		}
 
 		const result = await sendDiscordDm(env.DISCORD_BOT_TOKEN, recipient, reminderMessage(row, row.lead_minutes), fetchFn);
 		if (result.ok) {
-			await finish(db, id, 'sent', null, now);
+			await finish(db, id, 'sent', null, at);
 			summary.sent++;
 		} else if (result.retryable && row.attempts < MAX_ATTEMPTS) {
 			const waitMs = Math.max((result.retryAfterSeconds ?? 0) * 1000, 2 ** row.attempts * 60_000);
 			await db
 				.prepare("UPDATE notifications SET status = 'scheduled', next_attempt_at = ?, last_error = ?, updated_at = ? WHERE id = ?")
-				.bind(new Date(now.getTime() + waitMs).toISOString(), result.code, nowIso, id)
+				.bind(new Date(at.getTime() + waitMs).toISOString(), result.code, nowIso, id)
 				.run();
 			summary.retried++;
 		} else {
-			await finish(db, id, 'failed', result.code, now);
+			await finish(db, id, 'failed', result.code, at);
 			summary.failed++;
 		}
 	}
