@@ -26,6 +26,8 @@ export const CreateMemosRequestSchema = v.object({
 		v.maxLength(LIMITS.textMax, `메모는 ${LIMITS.textMax}자 이하로 입력해 주세요.`),
 	),
 	requestId: v.pipe(v.string(), v.uuid('requestId 형식이 올바르지 않습니다.')),
+	/** "추가 질문 안 하기": save right away; unclear parts stay undecided (never guessed). */
+	noQuestions: v.optional(v.boolean()),
 });
 
 export const CompleteRequestSchema = v.object({

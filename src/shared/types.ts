@@ -62,6 +62,8 @@ export interface CreateMemosRequest {
 	nickname: string;
 	text: string;
 	requestId: string;
+	/** "추가 질문 안 하기" (remembered per browser): no clarifying questions for this input. */
+	noQuestions?: boolean;
 }
 
 export interface CreateMemosResponse {

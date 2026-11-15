@@ -74,6 +74,27 @@ describe('clear input: saved right away, exactly as before', () => {
 	});
 });
 
+describe('"추가 질문 안 하기" checkbox (noQuestions): never ask, save at once', () => {
+	it('unclear parts are saved undecided (no invented time or day); a repeat question stays on the card; one AI call', async () => {
+		const t = makeApp();
+		const ask = (text: string) =>
+			t.send('/api/memos', { method: 'POST', body: JSON.stringify({ nickname: '확인', text, requestId: rid(), noQuestions: true }) });
+		const meeting = await ask('내일 3시 회의하고 금요일까지 보고서 제출');
+		expect(meeting.status).toBe(201);
+		expect(((await meeting.json()) as CreateMemosResponse).memos.map((m) => [m.title, m.due_date, m.due_at])).toEqual([
+			['회의', '2026-11-17', null], // the bare "3시" is not kept as 03:00
+			['보고서 제출', '2026-11-20', null],
+		]);
+		const week = (await (await ask('다음 주에 병원 가야 해')).json()) as CreateMemosResponse;
+		expect(week.memos[0]).toMatchObject({ due_date: null, due_at: null });
+		const routine = (await (await ask('월 화 목 오후 7시에 운동하기')).json()) as CreateMemosResponse;
+		expect(routine.memos[0].recurrence).toBeNull();
+		expect(routine.memos[0].recurrence_question?.repeat).toMatchObject({ kind: 'weekly', days: [0, 1, 3] });
+		expect((await db.prepare('SELECT COUNT(*) AS n FROM memo_drafts').first<{ n: number }>())?.n).toBe(0);
+		expect(t.calls.n).toBe(3);
+	});
+});
+
 describe('unclear input: a draft first, saved once after answers', () => {
 	it('nothing is saved or shown until commit; answers apply by rules; commit happens once', async () => {
 		const t = makeApp();

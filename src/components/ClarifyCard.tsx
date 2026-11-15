@@ -104,7 +104,7 @@ export function ClarifyCard({
 					이번 질문 건너뛰기
 				</button>
 				<button type="button" className="primary small" disabled={busy} onClick={() => void save(answers)}>
-					추가 질문 안 하기 · 지금 저장
+					추가 질문 안 하기
 				</button>
 				<button type="button" className="link-button memo-card__delete" disabled={busy} onClick={() => void discard()}>
 					저장 취소

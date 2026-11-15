@@ -972,6 +972,7 @@ export function createApi(deps: ApiDeps) {
 					nickname,
 					rawText: input.text,
 					createdAt: now().toISOString(),
+					noQuestions: input.noQuestions === true,
 					authorKeyHash: await authorKeyHash(c),
 				},
 				{ timeoutMs, onProgress, signal },

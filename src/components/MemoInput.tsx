@@ -11,6 +11,7 @@ const EXAMPLE = '오늘 장 보고, 내일 오후 3시에 병원 예약해야 �
 
 const AUTO_SEND_KEY = 'memo-assistant:voice-auto-send';
 const DRAFT_KEY = 'memo-assistant:open-draft';
+const NO_QUESTIONS_KEY = 'memo-assistant:no-questions';
 
 /** One-line progress for the folded card (same server-reported steps as the full list). */
 const QUIET_STATUS: Record<OrganizeStage, (count: number | null) => string> = {
@@ -113,7 +114,7 @@ export function MemoInput({
 		setProgress(null);
 		try {
 			const result = await createMemosWithProgress(
-				{ nickname, text: trimmed, requestId: pendingRequest.current.requestId },
+				{ nickname, text: trimmed, requestId: pendingRequest.current.requestId, ...(noQuestions ? { noQuestions: true } : {}) },
 				{
 					signal: controller.signal,
 					onProgress: (event) =>
@@ -145,6 +146,22 @@ export function MemoInput({
 		}
 	}
 
+	// "추가 질문 안 하기": never ask; unclear parts are saved undecided (off by default, remembered per browser).
+	const [noQuestions, setNoQuestions] = useState(() => {
+		try {
+			return localStorage.getItem(NO_QUESTIONS_KEY) === '1';
+		} catch {
+			return false;
+		}
+	});
+	function chooseNoQuestions(on: boolean) {
+		setNoQuestions(on);
+		try {
+			localStorage.setItem(NO_QUESTIONS_KEY, on ? '1' : '0');
+		} catch {
+			// convenience only
+		}
+	}
 	// Clarifying questions: an organized input waiting for answers (not saved yet).
 	const [draft, setDraft] = useState<MemoDraftPayload | null>(null);
 	const [notice, setNotice] = useState<string | null>(null);
@@ -217,6 +234,10 @@ export function MemoInput({
 			<label className="voice-autosend small" title={shared ? '검토 없이 바로 공개 공간에 정리돼요' : '검토 없이 바로 정리해요'}>
 				<input type="checkbox" checked={autoSend} disabled={pending} onChange={(e) => chooseAutoSend(e.target.checked)} />
 				바로 보내기
+			</label>
+			<label className="voice-autosend small" title="날짜·시각·반복이 불분명해도 묻지 않고 바로 저장해요. 불분명한 부분은 비워 둬요.">
+				<input type="checkbox" checked={noQuestions} disabled={pending} onChange={(e) => chooseNoQuestions(e.target.checked)} />
+				추가 질문 안 하기
 			</label>
 		</div>
 	);
