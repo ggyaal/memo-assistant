@@ -1,5 +1,6 @@
 import type {
 	AgendaResponse,
+	CalendarResponse,
 	ChannelStatus,
 	NotificationChannel,
 	SettingsResponse,
@@ -14,6 +15,7 @@ import type {
 	MemoProgressEvent,
 	MemoStreamError,
 	ReminderRequest,
+	ReminderTone,
 	ReorderRequest,
 	UsageResponse,
 } from '../shared/types.ts';
@@ -249,4 +251,22 @@ export function updateReminderDefaults(body: { leadMinutes: number; dateOnlyTime
 		headers: { 'content-type': 'application/json' },
 		body: JSON.stringify(body),
 	});
+}
+
+export function updateReminderTone(tone: ReminderTone): Promise<{ reminderTone: ReminderTone }> {
+	return request('/api/settings/tone', {
+		method: 'PATCH',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({ tone }),
+	});
+}
+
+/** One example Discord card in the saved tone. */
+export function sendTonePreview(): Promise<{ sent: true }> {
+	return request('/api/settings/notifications/discord/preview', { method: 'POST' });
+}
+
+/** Dated memos of one KST month (YYYY-MM), from the same memo rows as the list. */
+export function fetchCalendar(month: string): Promise<CalendarResponse> {
+	return request(`/api/calendar?month=${encodeURIComponent(month)}`);
 }

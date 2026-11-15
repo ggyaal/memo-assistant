@@ -358,3 +358,20 @@ export async function getMemo(db: D1Database, workspaceId: string, id: string): 
 	const row = await db.prepare(`${MEMO_SELECT} WHERE m.id = ? AND m.workspace_id = ? AND m.deleted_at IS NULL`).bind(id, workspaceId).first<MemoRow>();
 	return row ? toMemo(row) : null;
 }
+
+/**
+ * Memos with a deadline/schedule day in [from, to] (KST days, inclusive) for the
+ * calendar. Uses the stored KST day (due_date), never created_at; hidden memos excluded.
+ */
+export async function listCalendar(db: D1Database, workspaceId: string, from: string, to: string, max = 500): Promise<Memo[]> {
+	const { results } = await db
+		.prepare(
+			`${MEMO_SELECT}
+			 WHERE m.workspace_id = ? AND m.deleted_at IS NULL AND m.due_date IS NOT NULL AND m.due_date BETWEEN ? AND ?
+			 ORDER BY m.due_date ASC, (m.due_at IS NOT NULL) ASC, m.due_at ASC, m.created_at ASC, m.position ASC
+			 LIMIT ?`,
+		)
+		.bind(workspaceId, from, to, max)
+		.all<MemoRow>();
+	return results.map(toMemo);
+}

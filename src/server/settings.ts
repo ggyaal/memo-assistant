@@ -3,7 +3,9 @@
 import type { Provider } from './auth/providers.ts';
 import { linkedProviders } from './auth/store.ts';
 import { checkGuildMember, sendDiscordDm } from './notify/discord.ts';
-import { discordRecipient } from './notify/reminders.ts';
+import { discordReady, discordRecipient } from './notify/reminders.ts';
+import { reminderCard, sampleTiming } from '../shared/discord-card.ts';
+import { REMINDER_TONES, type ReminderTone } from '../shared/types.ts';
 
 export interface SettingsEnv {
 	DISCORD_BOT_TOKEN?: string;
@@ -11,6 +13,8 @@ export interface SettingsEnv {
 	DISCORD_SERVER_INVITE?: string;
 	/** Server (guild) id where the bot lives. When set, Discord stays locked until the user joins it. */
 	DISCORD_GUILD_ID?: string;
+	/** Public https address of this app (link button on cards). */
+	PUBLIC_APP_URL?: string;
 }
 
 /** Discord server membership as shown in settings. `joined: null` = could not check right now. */
@@ -156,4 +160,32 @@ export async function setDisplayName(db: D1Database, userId: string, workspaceId
 			.bind(`${displayName}님의 메모`, workspaceId, userId),
 		db.prepare('UPDATE sources SET nickname = ? WHERE workspace_id = ?').bind(displayName, workspaceId),
 	]);
+}
+
+export async function getReminderTone(db: D1Database, userId: string): Promise<ReminderTone> {
+	const row = await db.prepare('SELECT reminder_tone FROM users WHERE id = ?').bind(userId).first<{ reminder_tone: string | null }>();
+	return (REMINDER_TONES as readonly string[]).includes(row?.reminder_tone ?? '') ? (row!.reminder_tone as ReminderTone) : 'friendly';
+}
+
+export async function setReminderTone(db: D1Database, userId: string, tone: ReminderTone): Promise<void> {
+	await db.prepare('UPDATE users SET reminder_tone = ? WHERE id = ?').bind(tone, userId).run();
+}
+
+export type PreviewResult = { ok: true } | { ok: false; code: 'channel_off' | 'test_failed'; message: string };
+
+/**
+ * Send one example card in the user's saved tone, so they can see the real DM.
+ * Only for users whose Discord channel is on (verified). Templates only, no AI.
+ */
+export async function sendTonePreview(db: D1Database, env: SettingsEnv, userId: string, now: Date, fetchFn: typeof fetch): Promise<PreviewResult> {
+	if (!env.DISCORD_BOT_TOKEN || !(await discordReady(db, userId))) {
+		return { ok: false, code: 'channel_off', message: '먼저 Discord 알림을 켜 주세요(테스트 DM 성공 필요).' };
+	}
+	const recipient = await discordRecipient(db, userId);
+	if (!recipient) return { ok: false, code: 'channel_off', message: 'Discord 계정을 먼저 연결해 주세요.' };
+	const tone = await getReminderTone(db, userId);
+	const { memo, timing } = sampleTiming(now);
+	const card = reminderCard(tone, memo, timing, env.PUBLIC_APP_URL);
+	const result = await sendDiscordDm(env.DISCORD_BOT_TOKEN, recipient, { ...card, content: `🧪 미리보기 · ${card.content ?? ''}` }, fetchFn);
+	return result.ok ? { ok: true } : { ok: false, code: 'test_failed', message: result.message };
 }

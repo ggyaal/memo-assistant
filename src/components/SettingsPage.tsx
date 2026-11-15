@@ -3,12 +3,15 @@ import {
 	ApiRequestError,
 	fetchSettings,
 	type MeResponse,
+	sendTonePreview,
 	setNotificationChannel,
 	updateDisplayName,
+	updateReminderTone,
 	updateReminderDefaults,
 } from '../client/api.ts';
 import { PROVIDER_ORDER, ProviderIcon } from './ProviderIcon.tsx';
-import { LIMITS, type ChannelStatus, type SettingsResponse } from '../shared/types.ts';
+import { reminderCard, sampleTiming, toneMessage } from '../shared/discord-card.ts';
+import { LIMITS, REMINDER_TONE_LABELS, REMINDER_TONES, type ChannelStatus, type ReminderTone, type SettingsResponse } from '../shared/types.ts';
 
 export const RETURN_TO_SETTINGS_KEY = 'memo-assistant:return-to-settings';
 
@@ -93,6 +96,34 @@ export function SettingsPage({ me, onBack, onProfileChanged }: { me: MeResponse;
 		document.addEventListener('visibilitychange', onVisible);
 		return () => document.removeEventListener('visibilitychange', onVisible);
 	}, [waitingForJoin]);
+
+	// Discord reminder wording: saved at once (fixed templates; examples are the exact DM sentences).
+	const [toneStatus, setToneStatus] = useState<{ text: string; error: boolean } | null>(null);
+	const [previewBusy, setPreviewBusy] = useState(false);
+	async function chooseTone(tone: ReminderTone) {
+		const previous = settings?.reminderTone;
+		setSettings((s) => (s ? { ...s, reminderTone: tone } : s));
+		setToneStatus(null);
+		try {
+			await updateReminderTone(tone);
+			setToneStatus({ text: `‘${REMINDER_TONE_LABELS[tone]}’ 말투로 저장했어요.`, error: false });
+		} catch (e) {
+			if (previous) setSettings((s) => (s ? { ...s, reminderTone: previous } : s));
+			setToneStatus({ text: e instanceof ApiRequestError ? e.message : '저장하지 못했어요.', error: true });
+		}
+	}
+	async function preview() {
+		setPreviewBusy(true);
+		setToneStatus(null);
+		try {
+			await sendTonePreview();
+			setToneStatus({ text: 'Discord DM으로 미리보기 카드를 보냈어요.', error: false });
+		} catch (e) {
+			setToneStatus({ text: e instanceof ApiRequestError ? e.message : '보내지 못했어요.', error: true });
+		} finally {
+			setPreviewBusy(false);
+		}
+	}
 
 	const replaceChannel = (next: ChannelStatus) =>
 		setSettings((s) => (s ? { ...s, notifications: s.notifications.map((n) => (n.channel === next.channel ? next : n)) } : s));
@@ -244,6 +275,14 @@ export function SettingsPage({ me, onBack, onProfileChanged }: { me: MeResponse;
 								);
 							})}
 						</ul>
+						<ToneSection
+							tone={settings.reminderTone}
+							discord={settings.notifications.find((n) => n.channel === 'discord')}
+							previewBusy={previewBusy}
+							status={toneStatus}
+							onChoose={(t) => void chooseTone(t)}
+							onPreview={() => void preview()}
+						/>
 						<form className="settings__defaults" onSubmit={saveDefaults} aria-labelledby="settings-defaults">
 							<h4 id="settings-defaults">자동 알림 기본값</h4>
 							<p className="muted small">AI가 알림을 추천한 메모는 아래 기준으로 자동 예약돼요. 다가오는 알림에서 하나씩 끌 수 있어요.</p>
@@ -312,5 +351,66 @@ function DiscordServerJoin({
 				</button>
 			</span>
 		</span>
+	);
+}
+
+/** Four fixed wordings for Discord reminders; each example is the exact sentence a DM would use. */
+function ToneSection({
+	tone,
+	discord,
+	previewBusy,
+	status,
+	onChoose,
+	onPreview,
+}: {
+	tone: ReminderTone;
+	discord: ChannelStatus | undefined;
+	previewBusy: boolean;
+	status: { text: string; error: boolean } | null;
+	onChoose: (tone: ReminderTone) => void;
+	onPreview: () => void;
+}) {
+	const usable = !!discord?.available;
+	const { memo, timing } = sampleTiming(new Date());
+	const card = reminderCard(tone, memo, timing);
+	return (
+		<fieldset className="settings__tone" disabled={!usable} aria-describedby="tone-help">
+			<legend>알림 말투</legend>
+			<p id="tone-help" className="muted small">
+				{usable
+					? 'Discord 알림 문장의 말투예요. AI 없이 정해진 문장에 메모 제목과 시간만 넣어요. 예: “병원 방문” 30분 전'
+					: 'Discord 알림을 쓸 수 있을 때 고를 수 있어요(Discord 계정 연결·서버 가입 필요).'}
+			</p>
+			<div className="tone-options" role="radiogroup" aria-label="알림 말투">
+				{REMINDER_TONES.map((t) => (
+					<label key={t} className={`tone-option${t === tone ? ' is-selected' : ''}`}>
+						<input type="radio" name="reminder-tone" value={t} checked={t === tone} onChange={() => onChoose(t)} />
+						<span className="tone-option__text">
+							<strong>{REMINDER_TONE_LABELS[t]}</strong>
+							<span className="muted small">{toneMessage(t, memo, timing)}</span>
+						</span>
+					</label>
+				))}
+			</div>
+			<div className="tone-card" aria-label="Discord 카드 미리보기">
+				<span className="tone-card__author small">{(card.embeds?.[0] as { author: { name: string } }).author.name}</span>
+				<strong>{(card.embeds?.[0] as { title: string }).title}</strong>
+				<span className="small">{(card.embeds?.[0] as { description: string }).description}</span>
+				<span className="muted small">
+					🗂 일정 · 🔔 30분 전 · ⏰ 예정 시각 · [메모비서에서 확인하기]
+				</span>
+			</div>
+			<div className="row">
+				<button type="button" className="secondary small" disabled={!discord?.enabled || previewBusy} onClick={onPreview}>
+					{previewBusy ? '보내는 중…' : '🧪 이 말투로 미리보기 DM 보내기'}
+				</button>
+				{!discord?.enabled && usable && <span className="muted small">Discord 알림을 켜면 보낼 수 있어요.</span>}
+			</div>
+			{status && (
+				<p className={status.error ? 'error small' : 'muted small'} role={status.error ? 'alert' : 'status'}>
+					{status.text}
+				</p>
+			)}
+		</fieldset>
 	);
 }

@@ -1,5 +1,6 @@
 // Reminders: confirmed by the user per memo, delivered by the cron dispatcher.
-import { earliestReminderTime, type NotificationChannel, REMINDER_MIN_LEAD_MINUTES } from '../../shared/types.ts';
+import { earliestReminderTime, type MemoCategory, type NotificationChannel, REMINDER_MIN_LEAD_MINUTES } from '../../shared/types.ts';
+import { reminderCard, reminderText, type ReminderTone } from '../../shared/discord-card.ts';
 import { sendDiscordDm } from './discord.ts';
 
 export const LEAD_OPTIONS = [0, 10, 30, 60] as const;
@@ -13,6 +14,8 @@ const KST_OFFSET_MS = 9 * 60 * 60 * 1000;
 export interface NotifyEnv {
 	DB: D1Database;
 	DISCORD_BOT_TOKEN?: string;
+	/** Public https address of this app, for the card's link button (optional). */
+	PUBLIC_APP_URL?: string;
 }
 
 /** Discord user id of the user's linked Discord account, if any. */
@@ -31,35 +34,6 @@ export async function discordReady(db: D1Database, userId: string): Promise<bool
 		.bind(userId)
 		.first<{ enabled: number; verified_at: string | null }>();
 	return !!row && row.enabled === 1 && !!row.verified_at;
-}
-
-function kstLabel(iso: string, withTime: boolean): string {
-	return new Intl.DateTimeFormat('ko-KR', {
-		timeZone: 'Asia/Seoul',
-		month: 'long',
-		day: 'numeric',
-		weekday: 'short',
-		...(withTime ? { hour: 'numeric', minute: '2-digit' } : {}),
-	}).format(new Date(iso));
-}
-
-/** Whole minutes from a reminder to the memo's time (for "N분 뒤"), or null if after it / no time. */
-function minutesBefore(dueAt: string | null, scheduledAt: string): number | null {
-	if (!dueAt) return null;
-	const minutes = Math.round((Date.parse(dueAt) - Date.parse(scheduledAt)) / 60_000);
-	return minutes >= 0 ? minutes : null;
-}
-
-export function reminderMessage(memo: { title: string; due_at: string | null; due_date: string | null }, leadMinutes: number | null): string {
-	const title = memo.title.replace(/[\r\n]+/g, ' ').slice(0, 60);
-	if (memo.due_at && leadMinutes !== null && leadMinutes >= 0 && leadMinutes <= 60) {
-		const when = kstLabel(memo.due_at, true);
-		const lead = leadMinutes === 0 ? '지금' : leadMinutes === 60 ? '1시간 뒤' : `${leadMinutes}분 뒤`;
-		return `메모비서 🔔 ${lead} '${title}' 시간이에요. (${when})`;
-	}
-	if (memo.due_at) return `메모비서 🔔 '${title}' 알림이에요. (${kstLabel(memo.due_at, true)})`;
-	const day = memo.due_date ? kstLabel(`${memo.due_date}T00:00:00+09:00`, false) : '';
-	return `메모비서 🔔 '${title}' 잊지 마세요.${day ? ` (${day})` : ''}`;
 }
 
 export type SetReminderResult =
@@ -226,17 +200,18 @@ export async function runDueReminders(
 
 		const row = await db
 			.prepare(
-				`SELECT n.user_id, n.scheduled_at, n.lead_minutes, n.attempts, m.title, m.due_at, m.due_date, m.completed_at, m.deleted_at,
-				        (m.workspace_id = n.workspace_id AND w.owner_user_id = n.user_id) AS owned
+				`SELECT n.user_id, n.scheduled_at, n.lead_minutes, n.attempts, m.title, m.category, m.due_at, m.due_date, m.completed_at, m.deleted_at,
+				        (m.workspace_id = n.workspace_id AND w.owner_user_id = n.user_id) AS owned, u.reminder_tone
 				 FROM notifications n
 				 JOIN memos m ON m.id = n.memo_id
 				 LEFT JOIN workspaces w ON w.id = n.workspace_id
+				 LEFT JOIN users u ON u.id = n.user_id
 				 WHERE n.id = ?`,
 			)
 			.bind(id)
 			.first<{
-				user_id: string; scheduled_at: string; lead_minutes: number | null; attempts: number;
-				title: string; due_at: string | null; due_date: string | null; completed_at: string | null; deleted_at: string | null; owned: number;
+				user_id: string; scheduled_at: string; lead_minutes: number | null; attempts: number; reminder_tone: ReminderTone | null;
+				title: string; category: MemoCategory; due_at: string | null; due_date: string | null; completed_at: string | null; deleted_at: string | null; owned: number;
 			}>();
 		if (!row || !row.owned || row.deleted_at || row.completed_at) {
 			await finish(db, id, 'canceled', row?.completed_at ? 'memo_completed' : 'memo_unavailable', at);
@@ -260,7 +235,14 @@ export async function runDueReminders(
 			continue;
 		}
 
-		const result = await sendDiscordDm(env.DISCORD_BOT_TOKEN, recipient, reminderMessage(row, row.lead_minutes ?? minutesBefore(row.due_at, row.scheduled_at)), fetchFn);
+		// The card is filled from stored fields and fixed templates only (no AI call).
+		const tone = row.reminder_tone ?? 'friendly';
+		const when = { scheduledAt: row.scheduled_at, leadMinutes: row.lead_minutes };
+		let result = await sendDiscordDm(env.DISCORD_BOT_TOKEN, recipient, reminderCard(tone, row, when, env.PUBLIC_APP_URL), fetchFn);
+		// Card refused as invalid (400 / 50035): it was not delivered, so plain text is sent once instead — never both.
+		if (!result.ok && (result.code === '50035' || result.code === 'http_400')) {
+			result = await sendDiscordDm(env.DISCORD_BOT_TOKEN, recipient, reminderText(tone, row, when), fetchFn);
+		}
 		if (result.ok) {
 			await finish(db, id, 'sent', null, at);
 			summary.sent++;

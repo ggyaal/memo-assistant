@@ -44,15 +44,20 @@ async function failure(res: Response): Promise<DmResult> {
 	return { ok: false, retryable: false, code: code || `http_${res.status}`, message: 'Discord로 보내지 못했어요.' };
 }
 
-/** Send one DM to a Discord user id. Mentions are disabled (content may include memo text). */
-export async function sendDiscordDm(token: string, recipientId: string, content: string, fetchFn: typeof fetch): Promise<DmResult> {
+/** Text, or a message with an Embed card (and optional link button). */
+export type DmPayload = string | { content?: string; embeds?: unknown[]; components?: unknown[] };
+
+/** Send one DM to a Discord user id. Mentions are always disabled (memo text is user input). */
+export async function sendDiscordDm(token: string, recipientId: string, payload: DmPayload, fetchFn: typeof fetch): Promise<DmResult> {
+	const message = typeof payload === 'string' ? { content: payload } : payload;
 	try {
 		const open = await call(fetchFn, token, '/users/@me/channels', { recipient_id: recipientId });
 		if (!open.ok) return failure(open);
 		const channel = (await open.json()) as { id?: string };
 		if (!channel.id) return { ok: false, retryable: true, code: 'no_channel', message: 'Discord DM 채널을 열지 못했어요.' };
 		const sent = await call(fetchFn, token, `/channels/${channel.id}/messages`, {
-			content: content.slice(0, 2000),
+			...message,
+			...(message.content !== undefined ? { content: message.content.slice(0, 2000) } : {}),
 			allowed_mentions: { parse: [] },
 		});
 		return sent.ok ? { ok: true } : failure(sent);

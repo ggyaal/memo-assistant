@@ -110,6 +110,8 @@ describe('MemoOrganizer agent (faux model, real Flue runtime + local D1)', () =>
 		expect(prompt).toContain('save_memos');
 		expect(prompt).toContain('priority');
 		expect(prompt).toContain('due_date');
+		// Category rule: a date alone does not make something a schedule.
+		expect(prompt).toContain('날짜·시각이 있다고 모두 schedule이 아닙니다');
 		expect(prompt).not.toContain(json.source.id);
 	});
 

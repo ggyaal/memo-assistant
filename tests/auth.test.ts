@@ -4,7 +4,7 @@ import { pkceChallenge, sha256Hex } from '../src/server/auth/crypto.ts';
 import type { RunMemoAgent } from '../src/server/agent-runner.ts';
 import { createApi, type ApiBindings } from '../src/server/routes.ts';
 import { createSaveMemosTool, type MemoJob } from '../src/tools/save-memos.ts';
-import { CRON_LOOKAHEAD_MS, reminderMessage, runDueReminders } from '../src/server/notify/reminders.ts';
+import { CRON_LOOKAHEAD_MS, runDueReminders } from '../src/server/notify/reminders.ts';
 import { createTestD1 } from './helpers/d1.ts';
 
 /*
@@ -55,6 +55,8 @@ const fakeFetch: typeof fetch = async (input, init) => {
 	if (dm) {
 		if (dm[1] === 'flaky') return new Response('oops', { status: 500 });
 		const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+		// "cardless" refuses Embed cards as invalid (400 / 50035) but accepts plain text.
+		if (dm[1] === 'cardless' && body.embeds) return Response.json({ code: 50035, message: 'Invalid Form Body' }, { status: 400 });
 		sentDms.push({ to: dm[1], content: String(body.content), body, auth: new Headers(init?.headers).get('authorization') ?? '' });
 		return Response.json({ id: 'msg' });
 	}
@@ -565,6 +567,68 @@ describe('Discord channel: must join the bot\'s server first', () => {
 	});
 });
 
+describe('calendar keeps personal and shared data apart', () => {
+	it('each space sees only its own dated memos; the guest calendar never shows personal memos', async () => {
+		const send = makeApp();
+		const a = (await login(send, 'discord', 'alice')).jar;
+		const b = (await login(send, 'discord', 'bob')).jar;
+		await postMemo(send, '내일 앨리스 비밀 일정', a);
+		await postMemo(send, '내일 밥 일정', b);
+		await postMemo(send, '내일 공용 일정');
+		const titles = async (jar?: Jar) =>
+			((await (await send('/api/calendar?month=2026-11', { jar })).json()) as { memos: { title: string }[] }).memos.map((m) => m.title);
+		expect(await titles(a)).toEqual(['내일 앨리스 비밀 일정']);
+		expect(await titles(b)).toEqual(['내일 밥 일정']);
+		expect(await titles()).toEqual(['내일 공용 일정']);
+		// A workspace id sent by the client is ignored.
+		const forged = await send('/api/calendar?month=2026-11&workspace=ws_shared_guest', { jar: a });
+		expect(((await forged.json()) as { memos: { title: string }[] }).memos.map((m) => m.title)).toEqual(['내일 앨리스 비밀 일정']);
+	});
+});
+
+describe('Discord reminder tone (fixed templates)', () => {
+	const json = { 'content-type': 'application/json' };
+	const tone = async (send: Send, jar?: Jar) => ((await (await send('/api/settings', { jar })).json()) as { reminderTone: string }).reminderTone;
+	const setTone = (send: Send, jar: Jar | undefined, value: unknown, headers: Record<string, string> = {}) =>
+		send('/api/settings/tone', { method: 'PATCH', jar, headers: { ...json, ...headers }, body: JSON.stringify({ tone: value }) });
+	const preview = (send: Send, jar: Jar) => send('/api/settings/notifications/discord/preview', { method: 'POST', jar });
+
+	it('defaults to friendly, is saved per user and survives a new login', async () => {
+		const send = makeApp();
+		const a = (await login(send, 'discord', 'alice')).jar;
+		const b = (await login(send, 'discord', 'bob')).jar;
+		expect(await tone(send, a)).toBe('friendly');
+		expect((await setTone(send, a, 'formal')).status).toBe(200);
+		expect(await tone(send, (await login(send, 'discord', 'alice')).jar)).toBe('formal');
+		expect(await tone(send, b)).toBe('friendly');
+	});
+
+	it('rejects unknown tones, guests and other sites', async () => {
+		const send = makeApp();
+		const a = (await login(send, 'discord', 'alice')).jar;
+		expect((await setTone(send, a, 'angry')).status).toBe(400);
+		expect((await setTone(send, undefined, 'cute')).status).toBe(401);
+		expect((await setTone(send, a, 'cute', { origin: 'https://evil.example' })).status).toBe(403);
+		expect(await tone(send, a)).toBe('friendly');
+	});
+
+	it('preview sends one example card in the saved tone, only when Discord is on', async () => {
+		const send = makeApp();
+		const a = (await login(send, 'discord', 'alice')).jar;
+		expect((await preview(send, a)).status).toBe(409); // channel off
+		await send('/api/settings/notifications/discord', { method: 'PUT', jar: a, headers: json, body: JSON.stringify({ enabled: true }) });
+		await setTone(send, a, 'formal');
+		sentDms.length = 0;
+		expect((await preview(send, a)).status).toBe(200);
+		expect(sentDms).toHaveLength(1);
+		const embed = (sentDms[0].body.embeds as { description: string; title: string }[])[0];
+		expect(embed.title).toBe('📅 병원 방문');
+		expect(embed.description).toBe('💬 ‘병원 방문’ 예정 시각까지 30분 남았습니다. 일정을 확인해 주세요.');
+		expect(sentDms[0].content).toMatch(/^🧪 미리보기/);
+		expect(sentDms[0].body.allowed_mentions).toEqual({ parse: [] });
+	});
+});
+
 describe('reminders: confirm, cancel and deliver (Discord DM)', () => {
 	const json = { 'content-type': 'application/json' };
 	type Item = { id: string; title: string; due_at: string | null; due_date: string | null; reminder: { at: string; status: string; error: string | null } | null };
@@ -708,14 +772,6 @@ describe('reminders: confirm, cancel and deliver (Discord DM)', () => {
 		expect((await remind(send, jar, memo.id, body(['discord']))).status).toBe(200);
 	});
 
-	it('the DM wording follows the picked time: "N분 뒤" within an hour before, otherwise the memo time', async () => {
-		const memo = { title: '보고서 제출', due_at: '2026-11-16T06:00:00.000Z', due_date: '2026-11-16' };
-		expect(reminderMessage(memo, 0)).toContain('지금');
-		expect(reminderMessage(memo, 25)).toContain('25분 뒤');
-		expect(reminderMessage(memo, 180)).toBe("메모비서 🔔 '보고서 제출' 알림이에요. (11월 16일 (월) 오후 3:00)");
-		expect(reminderMessage(memo, null)).toContain('알림이에요');
-	});
-
 	it('editing the deadline moves "N분 전" reminders with it; a clock-time reminder stays; another user cannot edit', async () => {
 		const { send, jar, memo } = await aliceWithMemo(); // due 2026-11-16 15:00 KST
 		await remind(send, jar, memo.id, { leadMinutes: 30 }); // 14:30 KST
@@ -747,7 +803,40 @@ describe('reminders: confirm, cancel and deliver (Discord DM)', () => {
 		await remind(send, jar, memo.id, { at: '2026-11-16T14:30:00+09:00', channels: ['discord'] });
 		clock = new Date('2026-11-16T05:30:05Z');
 		expect((await run()).sent).toBe(1);
-		expect(sentDms[0].content).toContain('30분 뒤');
+		const embed = (sentDms[0].body.embeds as { description: string; fields: { name: string; value: string }[] }[])[0];
+		expect(embed.description).toContain('30분 남았어요');
+		expect(embed.fields.find((f) => f.name === '🔔 알림')?.value).toBe('30분 전');
+	});
+
+	it('if Discord refuses the card, the same reminder goes out once as plain text (never both)', async () => {
+		const { send, jar, memo } = await aliceWithMemo('cardless');
+		await remind(send, jar, memo.id, { leadMinutes: 30 });
+		clock = new Date('2026-11-16T05:30:10Z');
+		expect(await run()).toEqual({ sent: 1, retried: 0, failed: 0, canceled: 0 });
+		expect(sentDms).toHaveLength(1);
+		expect(sentDms[0].body.embeds).toBeUndefined();
+		expect(sentDms[0].content).toBe('🔔 메모비서 · ‘내일 보고서 제출’ 마감까지 30분 남았어요! 미리 챙겨 두세요 😊 (11월 16일 (월) 오후 3:00)');
+		expect(await run()).toEqual({ sent: 0, retried: 0, failed: 0, canceled: 0 });
+	});
+
+	it('real reminders use the tone the user saved', async () => {
+		const { send, jar, memo } = await aliceWithMemo();
+		await send('/api/settings/tone', { method: 'PATCH', jar, headers: json, body: JSON.stringify({ tone: 'cute' }) });
+		await remind(send, jar, memo.id, { leadMinutes: 30 });
+		clock = new Date('2026-11-16T05:30:10Z');
+		expect((await run()).sent).toBe(1);
+		expect((sentDms[0].body.embeds as { description: string }[])[0].description).toBe('💬 똑똑! ‘내일 보고서 제출’ 마감까지 30분 남았어요~ 화이팅 💪');
+	});
+
+	it('sending a reminder never touches Workers AI (templates only)', async () => {
+		const { send, jar, memo } = await aliceWithMemo();
+		await remind(send, jar, memo.id, { leadMinutes: 30 });
+		clock = new Date('2026-11-16T05:30:10Z');
+		const touched: string[] = [];
+		const AI = new Proxy({}, { get: (_t, key) => (touched.push(String(key)), () => { throw new Error('AI must not be called'); }) });
+		const result = await runDueReminders({ DB: db, DISCORD_BOT_TOKEN: 'bot-token', AI } as never, clock, fakeFetch);
+		expect(result.sent).toBe(1);
+		expect(touched).toEqual([]);
 	});
 
 	it('delivers once at the right time, only to the owner, with the memo and time', async () => {
@@ -760,7 +849,21 @@ describe('reminders: confirm, cancel and deliver (Discord DM)', () => {
 		expect(await run()).toEqual({ sent: 0, retried: 0, failed: 0, canceled: 0 }); // never twice
 		expect(sentDms).toHaveLength(1);
 		expect(sentDms[0].to).toBe('alice');
-		expect(sentDms[0].content).toBe("메모비서 🔔 30분 뒤 '내일 보고서 제출' 시간이에요. (11월 16일 (월) 오후 3:00)");
+		// Embed card from stored fields + the default friendly tone (no AI call).
+		expect(sentDms[0].content).toBe('🔔 내일 보고서 제출 · 30분 전');
+		expect(sentDms[0].body.embeds).toEqual([
+			expect.objectContaining({
+				title: '✅ 내일 보고서 제출',
+				description: '💬 ‘내일 보고서 제출’ 마감까지 30분 남았어요! 미리 챙겨 두세요 😊',
+				author: { name: '🔔 메모비서 · 할 일 알림' },
+				fields: [
+					{ name: '🗂 분류', value: '✅ 할 일', inline: true },
+					{ name: '🔔 알림', value: '30분 전', inline: true },
+					{ name: '⏰ 마감', value: '11월 16일 (월) 오후 3:00', inline: false },
+				],
+				timestamp: '2026-11-16T05:30:00.000Z',
+			}),
+		]);
 		expect(sentDms[0].body.allowed_mentions).toEqual({ parse: [] });
 		expect((await list(send, jar))[0].reminder?.status).toBe('sent');
 	});

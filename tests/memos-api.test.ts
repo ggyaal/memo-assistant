@@ -445,7 +445,8 @@ describe('PUT /api/memos/:id (edit an organized memo) and the idea list', () => 
 	}
 
 	it('saves corrections (title, content, category, priority, KST date and time) and lists them', async () => {
-		const app = makeApp(toolRunner(db));
+		const runner = toolRunner(db);
+		const app = makeApp(runner);
 		const [shopping] = await organized(app);
 		const res = await edit(app, shopping.id, full(shopping, { title: ' 마트 장보기 ', content: '우유, 계란 사기', category: 'schedule', priority: 'high', dueDate: '2026-11-12', dueTime: '18:30' }));
 		expect(res.status).toBe(200);
@@ -455,6 +456,8 @@ describe('PUT /api/memos/:id (edit an organized memo) and the idea list', () => 
 		expect(memo.due_text).toBeNull();
 		const listed = ((await (await app.request('/api/memos?scope=all')).json()) as ListMemosResponse).memos.find((m) => m.id === shopping.id);
 		expect(listed?.title).toBe('마트 장보기');
+		// Corrections are stored as given: the agent (AI) is not called again.
+		expect(runner.calls).toHaveLength(1);
 		// Removing the time keeps the day; removing the day removes the deadline.
 		expect(((await (await edit(app, shopping.id, full(memo, { dueTime: null }))).json()) as { memo: M }).memo).toMatchObject({ due_at: null, due_date: '2026-11-12' });
 		expect(((await (await edit(app, shopping.id, full(memo, { dueDate: null, dueTime: null }))).json()) as { memo: M }).memo).toMatchObject({ due_at: null, due_date: null });
@@ -500,6 +503,70 @@ describe('PUT /api/memos/:id (edit an organized memo) and the idea list', () => 
 		expect(await ideas()).toEqual(['장보기 앱 아이디어', 'AI 검색 기능']); // same submission: original memo order
 		await app.request(`/api/memos/${idea.id}`, { method: 'PATCH', body: JSON.stringify({ completed: true }) });
 		expect(await ideas()).toEqual(['장보기 앱 아이디어']);
+	});
+});
+
+describe('GET /api/calendar (same memo rows by KST day)', () => {
+	type Cal = { month: string; from: string; to: string; memos: { id: string; title: string; category: string; due_date: string | null; due_at: string | null; completed_at: string | null }[] };
+	const cal = async (app: ReturnType<typeof makeApp>, month?: string) => {
+		const res = await app.request(`/api/calendar${month ? `?month=${month}` : ''}`);
+		return { status: res.status, body: (await res.json()) as Cal };
+	};
+	const put = (app: ReturnType<typeof makeApp>, m: CreateMemosResponse['memos'][number], dueDate: string | null, dueTime: string | null, category = m.category) =>
+		app.request(`/api/memos/${m.id}`, { method: 'PUT', body: JSON.stringify({ title: m.title, content: m.content, category, priority: m.priority, dueDate, dueTime }) });
+
+	it('shows dated memos of the month by their KST day; undated memos and created_at never place an item', async () => {
+		const runner = toolRunner(db);
+		const app = makeApp(runner);
+		const memos = ((await (await app.request('/api/memos', { method: 'POST', body: body() })).json()) as CreateMemosResponse).memos;
+		// 장보기: date-only 11-09 (오늘), 병원: 11-10 15:00 KST, 아이디어: no date (created 11-09).
+		const nov = await cal(app, '2026-11');
+		expect(nov.body).toMatchObject({ month: '2026-11', from: '2026-11-01', to: '2026-11-30' });
+		expect(nov.body.memos.map((m) => [m.title, m.due_date])).toEqual([
+			['장보기', '2026-11-09'],
+			['병원 예약', '2026-11-10'],
+		]);
+		expect((await cal(app, '2026-10')).body.memos).toEqual([]);
+		// Default month = the current KST month.
+		expect((await cal(app)).body.month).toBe('2026-11');
+		// Calendar reads never call the AI.
+		expect(runner.calls).toHaveLength(1);
+		void memos;
+	});
+
+	it('a time just after midnight KST lands on the KST day (not the UTC day) and in the right month', async () => {
+		const app = makeApp(toolRunner(db));
+		const [shopping] = ((await (await app.request('/api/memos', { method: 'POST', body: body() })).json()) as CreateMemosResponse).memos;
+		await put(app, shopping, '2026-12-01', '00:30'); // = 2026-11-30T15:30Z
+		expect((await cal(app, '2026-11')).body.memos.map((m) => m.title)).not.toContain('장보기');
+		const dec = (await cal(app, '2026-12')).body.memos;
+		expect(dec.map((m) => [m.title, m.due_date, m.due_at])).toEqual([['장보기', '2026-12-01', '2026-11-30T15:30:00.000Z']]);
+	});
+
+	it('edits show up at once; done memos stay (struck through on screen); hidden memos are excluded', async () => {
+		const app = makeApp(toolRunner(db));
+		const [shopping, hospital, idea] = ((await (await app.request('/api/memos', { method: 'POST', body: body() })).json()) as CreateMemosResponse).memos;
+		await put(app, idea, '2026-11-20', null); // an idea can get a date if the person wants
+		await app.request(`/api/memos/${hospital.id}`, { method: 'PATCH', body: JSON.stringify({ completed: true }) });
+		await db.prepare('UPDATE memos SET deleted_at = ? WHERE id = ?').bind(clock.toISOString(), shopping.id).run();
+		const nov = (await cal(app, '2026-11')).body.memos;
+		expect(nov.map((m) => [m.title, m.category, m.due_date])).toEqual([
+			['병원 예약', 'todo', '2026-11-10'],
+			['AI 검색 기능', 'idea', '2026-11-20'],
+		]);
+		expect(nov[0].completed_at).not.toBeNull();
+	});
+
+	it.each([
+		['2028-02', '2028-02-29'],
+		['2026-02', '2026-02-28'],
+		['2026-12', '2026-12-31'],
+	])('month %s ends on %s', async (month, to) => {
+		expect((await cal(makeApp(toolRunner(db)), month)).body.to).toBe(to);
+	});
+
+	it.each(['2026-13', '2026-1', '26-11', 'abc', '1999-12'])('rejects month %s', async (month) => {
+		expect((await cal(makeApp(toolRunner(db)), month)).status).toBe(400);
 	});
 });
 

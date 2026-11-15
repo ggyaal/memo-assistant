@@ -64,6 +64,7 @@ AX School **Build Your Agent** 과제용으로, 여러 사람이 공개 체험�
 - 소셜 로그인은 Authorization Code + PKCE(S256) + 브라우저에 묶인 state(쿠키) + 1회용 state(D1, 10분)로 한다. 세션 쿠키는 `__Host-` + HttpOnly + Secure + SameSite=Lax이고, D1에는 토큰의 SHA-256만 저장한다. 공급자 토큰은 저장하지 않는다. 키가 없는 공급자는 "준비 중"으로 표시하고 가짜 값으로 켜지 않는다. 계정은 이메일로 자동으로 합치지 않는다(명시적 연결만).
 - 알림은 사용자가 메모마다 확인한 예약만 보낸다(날짜만 있으면 시각을 사용자가 고름). 발송은 `runDueReminders`(Cron)만 하며, 행 단위 조건부 claim과 발송 직전 재확인을 빼지 않는다. 게스트에게는 개인 알림을 보내지 않는다. 채널은 실제 테스트 메시지가 도착한 뒤에만 켠다.
 - 순서·완료·삭제는 **공용 공간에서는 모든 방문자에게 공유되는 편집**이다(소유 확인 없음, 2026-11-14 사용자 결정). 삭제는 기한 지난 미완료 메모만 숨김(`deleted_at`) 처리하고, 실제 DELETE SQL은 쓰지 않는다. 메모를 읽는 모든 쿼리에 `deleted_at IS NULL`을 넣는다.
+- Discord 알림 문장·카드(`src/shared/discord-card.ts`)와 캘린더(`GET /api/calendar`)는 **저장된 값과 고정 템플릿만** 쓴다. 발송·말투·캘린더 경로에서 Workers AI를 호출하지 않는다(`tests/auth.test.ts`의 AI 트랩 테스트 유지). 날짜만 있는 메모에 시각을 만들지 않고, 캘린더는 `created_at`이 아니라 KST `due_date`로 배치한다. 카드 실패(400) 시 텍스트 대체는 한 번만 보내고 둘 다 보내지 않는다. User Install은 쓰지 않는다(사용자 결정).
 - 에이전트 이름을 바꾸면 Durable Object 클래스명이 바뀐다. `wrangler.jsonc` migrations에 새 태그를 추가하고(`renamed_classes` 등) 기존 항목은 수정하지 않는다. `wrangler.jsonc`를 수정했다면 `npm run cf-typegen`을 다시 실행한다.
 
 ### 실행·검증 명령

@@ -141,6 +141,8 @@ export interface SettingsResponse {
 	linked: ('google' | 'discord' | 'kakao')[];
 	notifications: ChannelStatus[];
 	reminderDefaults: { leadMinutes: number; dateOnlyTime: string | null };
+	/** Discord reminder wording (fixed templates). */
+	reminderTone: ReminderTone;
 }
 
 export interface UsageResponse {
@@ -201,4 +203,23 @@ export interface MemoProgressEvent {
 export interface MemoStreamError extends ApiError {
 	status: number;
 	retryAfterSeconds?: number;
+}
+
+/** Discord reminder wording (fixed templates, no AI). Stored per user; default friendly. */
+export const REMINDER_TONES = ['friendly', 'standard', 'formal', 'cute'] as const;
+export type ReminderTone = (typeof REMINDER_TONES)[number];
+export const REMINDER_TONE_LABELS: Record<ReminderTone, string> = {
+	friendly: '친근한 비서 (기본)',
+	standard: '기본형',
+	formal: '정중한 비서형',
+	cute: '귀여운 말투',
+};
+
+/** GET /api/calendar?month=YYYY-MM — dated memos of one KST month (all four categories; the screen filters). */
+export interface CalendarResponse {
+	month: string;
+	/** First and last KST day of the month (YYYY-MM-DD). */
+	from: string;
+	to: string;
+	memos: Memo[];
 }

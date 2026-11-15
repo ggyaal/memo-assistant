@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { CATEGORY_LABELS, formatDue, formatKst, isOverdue, PRIORITY_LABELS } from '../client/format.ts';
+import { CATEGORY_HINTS, CATEGORY_LABELS, formatDue, formatKst, isOverdue, PRIORITY_LABELS } from '../client/format.ts';
 import type { Memo } from '../shared/types.ts';
 import { useSpace } from '../client/space.ts';
 import { CompleteCheckbox } from './CompleteCheckbox.tsx';
@@ -49,7 +49,9 @@ export function MemoCard({
 						onChanged?.();
 					}}
 				/>
-				<span className={`badge badge--${memo.category}`}>{CATEGORY_LABELS[memo.category]}</span>
+				<span className={`badge badge--${memo.category}`} title={CATEGORY_HINTS[memo.category]}>
+					{CATEGORY_LABELS[memo.category]}
+				</span>
 				{memo.priority && (
 					<span className={`badge badge--priority-${memo.priority}`} title={memo.priority_reason ?? undefined}>
 						중요도 {PRIORITY_LABELS[memo.priority]}

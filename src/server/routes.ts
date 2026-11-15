@@ -4,6 +4,7 @@ import { streamSSE } from 'hono/streaming';
 import * as v from 'valibot';
 import type {
 	AgendaResponse,
+	CalendarResponse,
 	ApiError,
 	ApiErrorCode,
 	CreateMemosResponse,
@@ -21,6 +22,7 @@ import {
 	findSourceByRequestId,
 	listMemos,
 	getMemo,
+	listCalendar,
 	listIdeas,
 	listOverdue,
 	updateMemo,
@@ -48,7 +50,7 @@ import {
 	setReminder,
 	setReminderDefaults,
 } from './notify/reminders.ts';
-import { type Channel, CHANNELS, channelStatuses, setChannel, setDisplayName, type SettingsEnv } from './settings.ts';
+import { type Channel, CHANNELS, channelStatuses, getReminderTone, sendTonePreview, setChannel, setDisplayName, setReminderTone, type SettingsEnv } from './settings.ts';
 import { type AuthVariables, registerAuthRoutes, resolveAuth } from './auth/routes.ts';
 import { kstDate, kstDayRangeUtc } from './time.ts';
 import {
@@ -72,6 +74,7 @@ import {
 	ChannelToggleSchema,
 	DisplayNameSchema,
 	ReminderDefaultsSchema,
+	ReminderToneSchema,
 	ReminderRequestSchema,
 } from './validation.ts';
 
@@ -266,6 +269,23 @@ export function createApi(deps: ApiDeps) {
 		}
 	});
 
+	// Calendar: the same memo rows, by their KST deadline/schedule day. No AI, no extra table.
+	api.get('/calendar', async (c) => {
+		const month = c.req.query('month') ?? kstDate(now()).slice(0, 7);
+		const m = /^(\d{4})-(0[1-9]|1[0-2])$/.exec(month);
+		if (!m || Number(m[1]) < 2000 || Number(m[1]) > 2100) return fail(c, 400, 'invalid_request', '월은 YYYY-MM 형식이어야 합니다.');
+		const last = new Date(Date.UTC(Number(m[1]), Number(m[2]), 0)).getUTCDate(); // calendar math, no time zone involved
+		const from = `${month}-01`;
+		const to = `${month}-${String(last).padStart(2, '0')}`;
+		try {
+			const memos = await listCalendar(c.env.DB, c.get('auth').workspace.id, from, to);
+			return c.json<CalendarResponse>({ month, from, to, memos });
+		} catch (error) {
+			console.error('calendar failed', describeError(error));
+			return fail(c, 500, 'db_error', '캘린더를 불러오지 못했습니다.');
+		}
+	});
+
 	// Speech → text for the input box. The audio is not stored; the text is only
 	// returned to the caller, who reviews it before anything is published.
 	api.post('/transcribe', async (c) => {
@@ -336,7 +356,35 @@ export function createApi(deps: ApiDeps) {
 			linked,
 			notifications: await channelStatuses(c.env.DB, c.env, user.userId, linked, fetchFn),
 			reminderDefaults: await getReminderDefaults(c.env.DB, user.userId),
+			reminderTone: await getReminderTone(c.env.DB, user.userId),
 		});
+	});
+
+	// Discord reminder wording: one of four fixed templates (no AI).
+	api.patch('/settings/tone', async (c) => {
+		const blocked = crossSiteBlock(c, true);
+		if (blocked) return blocked;
+		const { user } = c.get('auth');
+		if (!user) return fail(c, 401, 'login_required', '로그인이 필요합니다.');
+		const parsed = v.safeParse(ReminderToneSchema, (await readJson(c)) ?? null);
+		if (!parsed.success) return fail(c, 400, 'invalid_request', issuesToMessage(parsed.issues));
+		const limited = await mutationLimit(c, now());
+		if (limited) return limited;
+		await setReminderTone(c.env.DB, user.userId, parsed.output.tone);
+		return c.json({ reminderTone: parsed.output.tone });
+	});
+
+	// Send one example card in the saved tone (to see the real DM). Rate limited like other changes.
+	api.post('/settings/notifications/discord/preview', async (c) => {
+		const blocked = crossSiteBlock(c, false);
+		if (blocked) return blocked;
+		const { user } = c.get('auth');
+		if (!user) return fail(c, 401, 'login_required', '로그인이 필요합니다.');
+		const limited = await mutationLimit(c, now());
+		if (limited) return limited;
+		const result = await sendTonePreview(c.env.DB, c.env, user.userId, now(), fetchFn);
+		if (!result.ok) return fail(c, 409, result.code === 'channel_off' ? 'channel_off' : 'test_failed', result.message);
+		return c.json({ sent: true });
 	});
 
 	api.patch('/settings/reminders', async (c) => {

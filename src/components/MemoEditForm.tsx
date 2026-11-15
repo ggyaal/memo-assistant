@@ -1,6 +1,6 @@
 import { type FormEvent, useState } from 'react';
 import { ApiRequestError, updateMemo } from '../client/api.ts';
-import { CATEGORY_LABELS, PRIORITY_LABELS, toKstInput } from '../client/format.ts';
+import { CATEGORY_HINTS, CATEGORY_LABELS, PRIORITY_LABELS, toKstInput } from '../client/format.ts';
 import { useSpace } from '../client/space.ts';
 import { describeSensitive, detectSensitive } from '../shared/privacy.ts';
 import { LIMITS, MEMO_CATEGORIES, MEMO_PRIORITIES, type Memo, type MemoCategory, type MemoPriority } from '../shared/types.ts';
@@ -81,6 +81,9 @@ export function MemoEditForm({ memo, onSaved, onCancel }: { memo: Memo; onSaved:
 					</select>
 				</label>
 			</div>
+			<p className="muted small memo-edit__hint">
+				{CATEGORY_LABELS[category]}: {CATEGORY_HINTS[category]}. 분류를 바꿔도 AI를 다시 부르지 않아요.
+			</p>
 			<div className="memo-edit__row">
 				<label>
 					날짜

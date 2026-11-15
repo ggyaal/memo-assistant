@@ -1,5 +1,5 @@
 import * as v from 'valibot';
-import { LIMITS, MEMO_CATEGORIES, MEMO_PRIORITIES, type MemoCategory, type MemoPriority } from '../shared/types.ts';
+import { LIMITS, MEMO_CATEGORIES, MEMO_PRIORITIES, REMINDER_TONES, type MemoCategory, type MemoPriority } from '../shared/types.ts';
 import { hasExplicitTime, normalizeDueAt, reconcileRelativeDate, resolveDueDate } from './time.ts';
 
 // Strip ASCII control characters except tab/newline.
@@ -207,3 +207,7 @@ export const EditMemoSchema = v.pipe(
 	v.check((m) => m.dueTime === null || m.dueDate !== null, '시각을 정하려면 날짜도 골라 주세요.'),
 );
 export type EditMemoInput = v.InferOutput<typeof EditMemoSchema>;
+
+export const ReminderToneSchema = v.object({
+	tone: v.picklist(REMINDER_TONES, '알림 말투를 골라 주세요.'),
+});

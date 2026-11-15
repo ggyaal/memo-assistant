@@ -1,5 +1,13 @@
 import type { Memo, MemoCategory, MemoPriority } from '../shared/types.ts';
 
+/** What each category means (same wording as the AI instructions). */
+export const CATEGORY_HINTS: Record<MemoCategory, string> = {
+	todo: '실행하고 끝내야 하는 행동 · 마감이 있을 수 있어요 (예: 금요일까지 보고서 제출)',
+	schedule: '정해진 시각에 있는 약속·행사 (예: 월요일 오전 10시 회의)',
+	idea: '발전시킬 생각·기획 · 날짜는 필요할 때만',
+	note: '나중에 참고할 기록·정보 · 날짜는 필요할 때만',
+};
+
 export const CATEGORY_LABELS: Record<MemoCategory, string> = {
 	todo: '할 일',
 	schedule: '일정',
