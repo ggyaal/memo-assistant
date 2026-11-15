@@ -1,6 +1,5 @@
-import type { MeResponse, ProviderId } from '../client/api.ts';
-
-const ORDER: ProviderId[] = ['google', 'discord', 'kakao'];
+import type { MeResponse } from '../client/api.ts';
+import { PROVIDER_ORDER, ProviderIcon } from './ProviderIcon.tsx';
 
 /** First screen: social login (personal space) or the shared guest space. */
 export function Landing({ me, onGuest }: { me: MeResponse; onGuest: () => void }) {
@@ -11,14 +10,16 @@ export function Landing({ me, onGuest }: { me: MeResponse; onGuest: () => void }
 			</h2>
 			<p className="muted small">로그인하면 나만 보는 개인 메모 공간이 생겨요. 로그인 없이도 함께 쓰는 공개 공간을 이용할 수 있어요.</p>
 			<div className="landing__buttons">
-				{ORDER.map((id) => {
+				{PROVIDER_ORDER.map((id) => {
 					const provider = me.providers[id];
 					return provider.configured ? (
 						<a key={id} className={`login-button login-button--${id}`} href={`/api/auth/${id}/start`}>
+							<ProviderIcon id={id} />
 							{provider.label}로 계속하기
 						</a>
 					) : (
 						<span key={id} className={`login-button login-button--${id} is-disabled`} aria-disabled="true" title="아직 설정되지 않았어요">
+							<ProviderIcon id={id} />
 							{provider.label}로 계속하기 <span className="small">(준비 중)</span>
 						</span>
 					);

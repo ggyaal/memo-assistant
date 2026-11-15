@@ -632,7 +632,7 @@ button:disabled {
 	display: flex;
 	align-items: center;
 	justify-content: center;
-	gap: 6px;
+	gap: 10px;
 	padding: 12px;
 	border-radius: 10px;
 	border: 1px solid var(--border);
@@ -642,6 +642,37 @@ button:disabled {
 	font-weight: 600;
 	text-decoration: none;
 	cursor: pointer;
+}
+.login-button__icon {
+	flex: none;
+}
+/* Small brand tile for the linked-accounts list (keeps each mark on its own background). */
+.settings__provider {
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+}
+.provider-mark {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 28px;
+	height: 28px;
+	border-radius: 8px;
+}
+.provider-mark svg {
+	width: 16px;
+	height: 16px;
+}
+.provider-mark--discord {
+	background: #5865f2;
+}
+.provider-mark--google {
+	background: #ffffff;
+	border: 1px solid #747775;
+}
+.provider-mark--kakao {
+	background: #fee500;
 }
 .login-button--google {
 	background: #ffffff;

@@ -3,14 +3,13 @@ import {
 	ApiRequestError,
 	fetchSettings,
 	type MeResponse,
-	type ProviderId,
 	setNotificationChannel,
 	updateDisplayName,
 	updateReminderDefaults,
 } from '../client/api.ts';
+import { PROVIDER_ORDER, ProviderIcon } from './ProviderIcon.tsx';
 import { LIMITS, type ChannelStatus, type SettingsResponse } from '../shared/types.ts';
 
-const PROVIDERS: ProviderId[] = ['google', 'discord', 'kakao'];
 export const RETURN_TO_SETTINGS_KEY = 'memo-assistant:return-to-settings';
 
 /** Personal settings: profile, linked accounts and notification channels (signed-in only). */
@@ -141,12 +140,17 @@ export function SettingsPage({ me, onBack, onProfileChanged }: { me: MeResponse;
 						<h3 id="settings-accounts">연결된 계정</h3>
 						<p className="muted small">연결한 계정 중 어느 것으로 로그인해도 같은 개인 공간이 열려요. 이메일이 같아도 자동으로 합치지 않아요.</p>
 						<ul className="settings__list">
-							{PROVIDERS.map((id) => {
+							{PROVIDER_ORDER.map((id) => {
 								const provider = me.providers[id];
 								const linked = settings.linked.includes(id);
 								return (
 									<li key={id} className="settings__row">
-										<span>{provider.label}</span>
+										<span className="settings__provider">
+											<span className={`provider-mark provider-mark--${id}`}>
+												<ProviderIcon id={id} />
+											</span>
+											{provider.label}
+										</span>
 										{linked ? (
 											<span className="badge badge--linked">연결됨</span>
 										) : provider.configured ? (
