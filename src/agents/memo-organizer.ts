@@ -1,7 +1,12 @@
 'use agent';
-import { useInitialData, useModel, useTool } from '@flue/runtime';
+import { useDataWriter, useInitialData, useModel, useTool } from '@flue/runtime';
+import * as v from 'valibot';
 import { env } from 'cloudflare:workers';
 import { createSaveMemosTool, type MemoJob, MemoJobSchema } from '../tools/save-memos.ts';
+
+/** Name of the data part that carries save progress to the waiting request. */
+export const PROGRESS_PART = 'progress';
+const ProgressSchema = v.object({ stage: v.picklist(['found', 'saving']), count: v.number() });
 
 /** Free-plan Workers AI model with function calling (see docs/PROGRESS.md). */
 export const DEFAULT_MODEL = 'cloudflare/@cf/zai-org/glm-4.7-flash';
@@ -32,7 +37,9 @@ const INSTRUCTIONS = `당신은 한국어 메모 정리 도우미입니다. <sig
 export function MemoOrganizer() {
 	const job = useInitialData<MemoJob>();
 	useModel(env.MEMO_MODEL || DEFAULT_MODEL);
-	useTool(createSaveMemosTool({ db: env.DB, job }));
+	// Streamed to the waiting request as it happens (the model never sees it).
+	const writeProgressData = useDataWriter(PROGRESS_PART, { schema: ProgressSchema });
+	useTool(createSaveMemosTool({ db: env.DB, job, onProgress: writeProgressData }));
 	return INSTRUCTIONS;
 }
 

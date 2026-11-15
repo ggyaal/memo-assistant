@@ -24,8 +24,18 @@ export type MemoJob = v.InferOutput<typeof MemoJobSchema>;
  * the organized memo fields; the server sanitizes them and stores the original
  * input plus every memo in one atomic batch.
  */
-export function createSaveMemosTool(deps: { db: D1Database; job: MemoJob }) {
-	const { db, job } = deps;
+export interface SaveProgress {
+	stage: 'found' | 'saving';
+	count: number;
+}
+
+export function createSaveMemosTool(deps: {
+	db: D1Database;
+	job: MemoJob;
+	/** Live progress for the person waiting (Flue data part); never seen by the model. */
+	onProgress?: (progress: SaveProgress) => void;
+}) {
+	const { db, job, onProgress } = deps;
 	return defineTool({
 		name: 'save_memos',
 		description:
@@ -36,6 +46,8 @@ export function createSaveMemosTool(deps: { db: D1Database; job: MemoJob }) {
 		async run({ data }) {
 			const now = new Date(job.createdAt);
 			const memos = data.memos.map((memo) => sanitizeMemo(memo, job.rawText, now));
+			onProgress?.({ stage: 'found', count: memos.length });
+			onProgress?.({ stage: 'saving', count: memos.length });
 			const result = await saveSourceWithMemos(
 				db,
 				{

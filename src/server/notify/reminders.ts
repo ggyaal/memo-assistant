@@ -1,4 +1,5 @@
 // Reminders: confirmed by the user per memo, delivered by the cron dispatcher.
+import { earliestReminderTime, type NotificationChannel, REMINDER_MIN_LEAD_MINUTES } from '../../shared/types.ts';
 import { sendDiscordDm } from './discord.ts';
 
 export const LEAD_OPTIONS = [0, 10, 30, 60] as const;
@@ -44,11 +45,12 @@ function kstLabel(iso: string, withTime: boolean): string {
 
 export function reminderMessage(memo: { title: string; due_at: string | null; due_date: string | null }, leadMinutes: number | null): string {
 	const title = memo.title.replace(/[\r\n]+/g, ' ').slice(0, 60);
-	if (memo.due_at && leadMinutes !== null) {
+	if (memo.due_at && leadMinutes !== null && leadMinutes >= 0 && leadMinutes <= 60) {
 		const when = kstLabel(memo.due_at, true);
 		const lead = leadMinutes === 0 ? '지금' : leadMinutes === 60 ? '1시간 뒤' : `${leadMinutes}분 뒤`;
 		return `메모비서 🔔 ${lead} '${title}' 시간이에요. (${when})`;
 	}
+	if (memo.due_at) return `메모비서 🔔 '${title}' 알림이에요. (${kstLabel(memo.due_at, true)})`;
 	const day = memo.due_date ? kstLabel(`${memo.due_date}T00:00:00+09:00`, false) : '';
 	return `메모비서 🔔 '${title}' 잊지 마세요.${day ? ` (${day})` : ''}`;
 }
@@ -63,7 +65,7 @@ export type SetReminderResult =
  */
 export async function setReminder(
 	db: D1Database,
-	params: { userId: string; workspaceId: string; memoId: string; leadMinutes?: number; time?: string },
+	params: { userId: string; workspaceId: string; memoId: string; leadMinutes?: number; time?: string; at?: string; channels?: NotificationChannel[] },
 	now: Date,
 ): Promise<SetReminderResult> {
 	const memo = await db
@@ -72,6 +74,13 @@ export async function setReminder(
 		.first<{ id: string; due_at: string | null; due_date: string | null; completed_at: string | null }>();
 	if (!memo) return { ok: false, status: 404, code: 'not_found', message: '메모를 찾지 못했어요.' };
 	if (memo.completed_at) return { ok: false, status: 409, code: 'conflict', message: '완료한 메모에는 알림을 걸 수 없어요.' };
+	if (params.channels) {
+		// Kakao and Gmail are shown but cannot deliver yet: never accept them silently.
+		if (params.channels.length === 0) return { ok: false, status: 422, code: 'invalid_request', message: '알림 받을 곳을 하나 이상 켜 주세요.' };
+		if (params.channels.some((ch) => ch !== 'discord')) {
+			return { ok: false, status: 422, code: 'channel_unavailable', message: '카카오톡·Gmail 알림은 아직 준비 중이에요. Discord만 켜 주세요.' };
+		}
+	}
 	if (!(await discordReady(db, params.userId))) {
 		return { ok: false, status: 409, code: 'channel_off', message: '설정에서 Discord 알림을 먼저 켜 주세요(테스트 DM 성공 필요).' };
 	}
@@ -82,7 +91,14 @@ export async function setReminder(
 	const defaults = await getReminderDefaults(db, params.userId);
 	if (params.leadMinutes === undefined && memo.due_at) params = { ...params, leadMinutes: defaults.leadMinutes };
 	if (params.time === undefined && !memo.due_at && defaults.dateOnlyTime) params = { ...params, time: defaults.dateOnlyTime };
-	if (memo.due_at) {
+	if (params.at !== undefined) {
+		// A time the person picked (presets only fill this in). Any time is fine — before or after the deadline.
+		const at = Date.parse(params.at);
+		if (Number.isNaN(at)) return { ok: false, status: 422, code: 'invalid_request', message: '알림 시각 형식이 올바르지 않아요.' };
+		scheduledAt = new Date(Math.floor(at / 60_000) * 60_000).toISOString();
+		const before = memo.due_at ? Math.round((Date.parse(memo.due_at) - Date.parse(scheduledAt)) / 60_000) : null;
+		lead = before !== null && before >= 0 ? before : null;
+	} else if (memo.due_at) {
 		if (params.leadMinutes === undefined || !(LEAD_OPTIONS as readonly number[]).includes(params.leadMinutes)) {
 			return { ok: false, status: 422, code: 'invalid_request', message: '알림 시점을 골라 주세요(정시·10분·30분·1시간 전).' };
 		}
@@ -97,8 +113,13 @@ export async function setReminder(
 	} else {
 		return { ok: false, status: 422, code: 'no_deadline', message: '기한이 없는 메모에는 알림을 걸 수 없어요.' };
 	}
-	if (Date.parse(scheduledAt) <= now.getTime() + 60_000) {
-		return { ok: false, status: 422, code: 'past_time', message: '이미 지났거나 너무 가까운 시각이에요. 다른 시점을 골라 주세요.' };
+	if (Date.parse(scheduledAt) < earliestReminderTime(now).getTime()) {
+		return {
+			ok: false,
+			status: 422,
+			code: 'past_time',
+			message: `지났거나 ${REMINDER_MIN_LEAD_MINUTES - 1}분 이내인 시각이에요. 지금부터 ${REMINDER_MIN_LEAD_MINUTES}분 이후로 골라 주세요.`,
+		};
 	}
 
 	const nowIso = now.toISOString();
@@ -298,7 +319,7 @@ export async function autoScheduleRecommended(
 		.bind(params.workspaceId)
 		.all<{ id: string; due_at: string | null; due_date: string | null }>();
 
-	const earliest = now.getTime() + 60_000;
+	const earliest = earliestReminderTime(now).getTime(); // same rule as a manual reminder
 	const nowIso = now.toISOString();
 	const inserts: D1PreparedStatement[] = [];
 	for (const memo of results) {

@@ -1,6 +1,7 @@
-import { type FormEvent, useRef, useState } from 'react';
+import { type FormEvent, useEffect, useRef, useState } from 'react';
 import { useSpace } from '../client/space.ts';
-import { ApiRequestError, createMemos } from '../client/api.ts';
+import { ApiRequestError, cancelMemoRequest, createMemosWithProgress } from '../client/api.ts';
+import { OrganizeProgress, type OrganizeStage } from './OrganizeProgress.tsx';
 import { describeSensitive, detectSensitive } from '../shared/privacy.ts';
 import { VoiceRecorder } from './VoiceRecorder.tsx';
 import { LIMITS, type CreateMemosResponse } from '../shared/types.ts';
@@ -27,27 +28,60 @@ export function MemoInput({
 	const textarea = useRef<HTMLTextAreaElement>(null);
 	// Reused only when retrying the same text, so the server can de-duplicate.
 	const pendingRequest = useRef<{ text: string; requestId: string } | null>(null);
+	// Live steps reported by the server (null = nothing to show).
+	const [progress, setProgress] = useState<{ stage: OrganizeStage; count: number | null; failed: boolean } | null>(null);
+	const inFlight = useRef<AbortController | null>(null);
+
+	// Leaving the page/space closes the stream, which stops the AI work on the server.
+	useEffect(() => () => inFlight.current?.abort(), []);
+
+	const [cancelling, setCancelling] = useState(false);
+	async function cancel() {
+		const controller = inFlight.current;
+		const requestId = pendingRequest.current?.requestId;
+		if (!controller || cancelling) return;
+		setCancelling(true);
+		// Stop the agent on the server first (a closed connection alone may not reach it), then close the stream.
+		if (requestId) await cancelMemoRequest(requestId).catch(() => null);
+		controller.abort();
+		setCancelling(false);
+	}
 
 	async function submit(event?: FormEvent) {
 		event?.preventDefault();
 		const trimmed = text.trim();
-		if (!trimmed || pending || voiceBusy || sensitive.length > 0) return;
+		// inFlight blocks a second click even before React re-renders the disabled button.
+		if (!trimmed || pending || inFlight.current || voiceBusy || sensitive.length > 0) return;
 		if (pendingRequest.current?.text !== trimmed) {
 			pendingRequest.current = { text: trimmed, requestId: crypto.randomUUID() };
 		}
+		const controller = new AbortController();
+		inFlight.current = controller;
 		setPending(true);
 		setError(null);
+		setProgress(null);
 		try {
-			const result = await createMemos({ nickname, text: trimmed, requestId: pendingRequest.current.requestId });
+			const result = await createMemosWithProgress(
+				{ nickname, text: trimmed, requestId: pendingRequest.current.requestId },
+				{
+					signal: controller.signal,
+					onProgress: (event) =>
+						setProgress((p) => ({ stage: event.stage, count: event.count ?? p?.count ?? null, failed: false })),
+				},
+			);
 			pendingRequest.current = null;
 			setText('');
+			setProgress({ stage: 'done', count: result.memos.length, failed: false });
 			onCreated(result);
 		} catch (err) {
 			const apiError = err instanceof ApiRequestError ? err : null;
-			const retryable = !apiError || ['network_error', 'agent_timeout'].includes(apiError.code);
+			// Cancelled or cut off: the same request id lets a retry pick up a result that was saved meanwhile.
+			const retryable = !apiError || ['network_error', 'agent_timeout', 'cancelled'].includes(apiError.code);
 			if (!retryable) pendingRequest.current = null;
+			setProgress((p) => (p ? { ...p, failed: true } : p));
 			setError({ message: apiError?.message ?? '알 수 없는 오류가 발생했습니다.', retryable });
 		} finally {
+			inFlight.current = null;
 			setPending(false);
 			onSettled?.();
 		}
@@ -71,7 +105,11 @@ export function MemoInput({
 				ref={textarea}
 				id="memo-text"
 				value={text}
-				onChange={(e) => setText(e.target.value)}
+				onChange={(e) => {
+					setText(e.target.value);
+					// A finished/failed run's steps stay until the person starts editing again.
+					if (!pending) setProgress(null);
+				}}
 				maxLength={LIMITS.textMax}
 				rows={5}
 				placeholder={`예) ${EXAMPLE}`}
@@ -90,9 +128,19 @@ export function MemoInput({
 					⚠️ {describeSensitive(sensitive)}로 보이는 내용이 있어요. 모든 방문자에게 공개되므로 지우고 다시 적어 주세요.
 				</p>
 			)}
-			<button type="submit" className="primary" disabled={pending || voiceBusy || !text.trim() || sensitive.length > 0}>
+			<button type="submit" className="primary" disabled={pending || voiceBusy || !text.trim() || sensitive.length > 0} aria-busy={pending}>
 				{pending ? 'AI가 정리하는 중… (긴 글은 최대 2분)' : 'AI로 정리하기'}
 			</button>
+			{progress && (
+				<OrganizeProgress
+					stage={progress.stage}
+					count={progress.count}
+					failed={progress.failed}
+					// Cancelling stops the AI only until saving starts; after that the result is kept.
+					// Only while the AI is working (the run exists and has not started saving).
+					onCancel={pending && !cancelling && progress.stage === 'analyzing' ? () => void cancel() : undefined}
+				/>
+			)}
 			{error && (
 				<p className="error" role="alert">
 					{error.message}

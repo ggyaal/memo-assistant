@@ -54,6 +54,8 @@ export const DisplayNameSchema = v.object({
 export const ReminderRequestSchema = v.object({
 	leadMinutes: v.optional(v.pipe(v.number(), v.integer())),
 	time: v.optional(v.pipe(v.string(), v.regex(/^([01]\d|2[0-3]):[0-5]\d$/, '시각은 HH:MM 형식이어야 해요.'))),
+	at: v.optional(v.pipe(v.string(), v.isoTimestamp('알림 시각 형식이 올바르지 않아요.'))),
+	channels: v.optional(v.pipe(v.array(v.picklist(['discord', 'kakao', 'email'], '알 수 없는 알림 경로예요.')), v.maxLength(3))),
 });
 
 export const ReminderDefaultsSchema = v.object({
@@ -179,3 +181,6 @@ export function sanitizeMemo(memo: ModelMemo, rawText: string, now: Date): Sanit
 export function issuesToMessage(issues: v.BaseIssue<unknown>[]): string {
 	return issues[0]?.message ?? '요청 형식이 올바르지 않습니다.';
 }
+
+/** POST /api/memos/cancel — the request id the client generated for that submission. */
+export const CancelMemosRequestSchema = v.object({ requestId: v.pipe(v.string(), v.uuid()) });

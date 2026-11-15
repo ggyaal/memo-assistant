@@ -1,5 +1,6 @@
 import { Hono, type Context } from 'hono';
 import { secureHeaders } from 'hono/secure-headers';
+import { streamSSE } from 'hono/streaming';
 import * as v from 'valibot';
 import type {
 	AgendaResponse,
@@ -7,11 +8,13 @@ import type {
 	ApiErrorCode,
 	CreateMemosResponse,
 	ListMemosResponse,
+	MemoProgressEvent,
+	MemoStreamError,
 	SettingsResponse,
 	UsageResponse,
 } from '../shared/types.ts';
 import { LIMITS } from '../shared/types.ts';
-import type { RunMemoAgent } from './agent-runner.ts';
+import type { CancelMemoAgent, RunMemoAgent } from './agent-runner.ts';
 import { buildAgenda } from './agenda.ts';
 import {
 	deleteOverdueMemo,
@@ -55,6 +58,7 @@ import {
 } from './transcribe.ts';
 import {
 	CompleteRequestSchema,
+	CancelMemosRequestSchema,
 	CreateMemosRequestSchema,
 	issuesToMessage,
 	ListMemosQuerySchema,
@@ -76,6 +80,8 @@ export interface ApiBindings extends AuthEnv, SettingsEnv {
 
 export interface ApiDeps {
 	runAgent: RunMemoAgent;
+	/** Stops a running agent for "취소" (production: cancelMemoAgent). */
+	cancelAgent?: CancelMemoAgent;
 	transcribe?: Transcriber;
 	now?: () => Date;
 	newId?: () => string;
@@ -513,8 +519,73 @@ export function createApi(deps: ApiDeps) {
 		} catch {
 			return fail(c, 400, 'invalid_request', 'JSON 형식이 올바르지 않습니다.');
 		}
-		const parsed = v.safeParse(CreateMemosRequestSchema, body);
+
+		// Same work either way; the event stream only adds live progress (sent when each step happens).
+		if (!/\btext\/event-stream\b/i.test(c.req.header('accept') ?? '')) {
+			const outcome = await organizeMemos(c, body);
+			if (outcome.ok) return c.json<CreateMemosResponse>(outcome.body, outcome.status);
+			if (outcome.retryAfterSeconds) c.header('Retry-After', String(outcome.retryAfterSeconds));
+			return fail(c, outcome.status as Parameters<typeof fail>[1], outcome.error, outcome.message);
+		}
+		return streamSSE(c, async (stream) => {
+			const cancel = new AbortController();
+			// Closing the stream (the person left) stops the AI work, when the runtime reports it.
+			// The cancel button does not rely on this: it calls POST /api/memos/cancel.
+			stream.onAbort(() => cancel.abort());
+			c.req.raw.signal?.addEventListener('abort', () => cancel.abort());
+			// Keep events in order without making the work wait on the network.
+			let queue = Promise.resolve();
+			const send = (event: 'progress' | 'done' | 'error', data: unknown) => {
+				queue = queue.then(() => (cancel.signal.aborted ? undefined : stream.writeSSE({ event, data: JSON.stringify(data) }))).catch(() => {});
+				return queue;
+			};
+			void send('progress', { stage: 'checking' } satisfies MemoProgressEvent);
+			const outcome = await organizeMemos(c, body, (event) => void send('progress', event), cancel.signal).catch((error): OrganizeOutcome => {
+				console.error('memo stream failed', describeError(error));
+				return { ok: false, status: 500, error: 'agent_failed', message: 'AI가 메모를 정리하지 못했습니다. 잠시 후 다시 시도해 주세요.' };
+			});
+			if (outcome.ok) await send('done', outcome.body);
+			else await send('error', { error: outcome.error, message: outcome.message, status: outcome.status, retryAfterSeconds: outcome.retryAfterSeconds } satisfies MemoStreamError);
+		});
+	});
+
+	// "취소" while the AI is working: stop that request's agent before it can save.
+	api.post('/memos/cancel', async (c) => {
+		const blocked = crossSiteBlock(c, true);
+		if (blocked) return blocked;
+		const parsed = v.safeParse(CancelMemosRequestSchema, (await readJson(c)) ?? null);
 		if (!parsed.success) return fail(c, 400, 'invalid_request', issuesToMessage(parsed.issues));
+		const limited = await mutationLimit(c, now());
+		if (limited) return limited;
+		const { workspace } = c.get('auth');
+		// Already saved (finished first): nothing to stop; the retry returns that result.
+		if (await findSourceByRequestId(c.env.DB, workspace.id, parsed.output.requestId).catch(() => null)) {
+			return c.json({ cancelled: false, saved: true });
+		}
+		const cancelled = await (deps.cancelAgent ?? (async () => false))(parsed.output.requestId);
+		return c.json({ cancelled, saved: false });
+	});
+
+	type OrganizeOutcome =
+		| { ok: true; status: 200 | 201; body: CreateMemosResponse }
+		| { ok: false; status: number; error: ApiErrorCode; message: string; retryAfterSeconds?: number };
+
+	/** Validate → limits → Flue agent → save_memos → stored result. Shared by the JSON and the streaming response. */
+	async function organizeMemos(
+		c: ApiContext,
+		body: unknown,
+		onProgress?: (event: MemoProgressEvent) => void,
+		signal?: AbortSignal,
+	): Promise<OrganizeOutcome> {
+		const failure = (status: number, error: ApiErrorCode, message: string, retryAfterSeconds?: number): OrganizeOutcome => ({
+			ok: false,
+			status,
+			error,
+			message,
+			retryAfterSeconds,
+		});
+		const parsed = v.safeParse(CreateMemosRequestSchema, body);
+		if (!parsed.success) return failure(400, 'invalid_request', issuesToMessage(parsed.issues));
 		const input = parsed.output;
 		const db = c.env.DB;
 		const { user, workspace } = c.get('auth');
@@ -534,8 +605,7 @@ export function createApi(deps: ApiDeps) {
 		// stored or sent to the AI. A personal workspace is visible only to its owner.
 		const sensitive = workspace.kind === 'shared_guest' ? detectSensitive(`${nickname}\n${input.text}`) : [];
 		if (sensitive.length > 0) {
-			return fail(
-				c,
+			return failure(
 				400,
 				'sensitive_info',
 				`모든 방문자에게 공개되는 메모라 ${describeSensitive(sensitive)}로 보이는 내용은 저장할 수 없어요. 해당 부분을 지우고 다시 시도해 주세요.`,
@@ -545,9 +615,9 @@ export function createApi(deps: ApiDeps) {
 		try {
 			// Idempotency: a retried request returns the stored result without another AI call.
 			const existing = await findSourceByRequestId(db, workspace.id, input.requestId);
-			if (existing) {
-				return c.json<CreateMemosResponse>({ duplicate: true, source: existing.source, memos: existing.memos });
-			}
+			if (existing) return { ok: true, status: 200, body: { duplicate: true, source: existing.source, memos: existing.memos } };
+			// Cancelled while checking: stop before spending any AI quota.
+			if (signal?.aborted) return failure(499, 'cancelled', '메모 정리를 취소했어요.');
 
 			const decision = await consumeAiQuota(
 				db,
@@ -561,14 +631,13 @@ export function createApi(deps: ApiDeps) {
 				estimateMemoNeurons(input.text.length),
 			);
 			if (!decision.allowed) {
-				c.header('Retry-After', String(decision.retryAfterSeconds));
 				return decision.reason === 'rate_limited'
-					? fail(c, 429, 'rate_limited', '요청이 너무 잦습니다. 1분 후 다시 시도해 주세요.')
-					: fail(c, 429, 'daily_limit_reached', '오늘 데모의 AI 사용 한도에 도달했습니다. 내일 다시 시도해 주세요.');
+					? failure(429, 'rate_limited', '요청이 너무 잦습니다. 1분 후 다시 시도해 주세요.', decision.retryAfterSeconds)
+					: failure(429, 'daily_limit_reached', '오늘 데모의 AI 사용 한도에 도달했습니다. 내일 다시 시도해 주세요.', decision.retryAfterSeconds);
 			}
 		} catch (error) {
 			console.error('pre-agent db step failed', describeError(error));
-			return fail(c, 500, 'db_error', '저장소에 접근하지 못했습니다.');
+			return failure(500, 'db_error', '저장소에 접근하지 못했습니다.');
 		}
 
 		try {
@@ -581,32 +650,32 @@ export function createApi(deps: ApiDeps) {
 					rawText: input.text,
 					createdAt: now().toISOString(),
 				},
-				{ timeoutMs },
+				{ timeoutMs, onProgress, signal },
 			);
 		} catch (error) {
-			console.error('agent run failed', describeError(error));
 			const saved = await findSourceByRequestId(db, workspace.id, input.requestId).catch(() => null);
 			if (!saved) {
+				if (signal?.aborted) return failure(499, 'cancelled', '메모 정리를 취소했어요. 저장된 메모는 없어요.');
+				console.error('agent run failed', describeError(error));
 				const classified = classifyAgentError(error);
-				return fail(c, classified.status, classified.code, classified.message);
+				return failure(classified.status, classified.code, classified.message);
 			}
-			// The tool already saved everything; a late failure does not lose the result.
+			// The tool already saved everything; a late failure (or cancel) does not lose the result.
 			const withReminders = await afterSave(saved);
-			return c.json<CreateMemosResponse>({ duplicate: false, source: withReminders.source, memos: withReminders.memos }, 201);
+			return { ok: true, status: 201, body: { duplicate: false, source: withReminders.source, memos: withReminders.memos } };
 		}
 
 		const saved = await findSourceByRequestId(db, workspace.id, input.requestId).catch(() => null);
 		if (!saved) {
-			return fail(
-				c,
+			return failure(
 				502,
 				'not_saved',
 				'메모로 정리할 내용을 찾지 못했어요. 할 일·일정·떠오른 생각을 한두 문장으로 적어 다시 시도해 주세요. 입력한 글은 그대로 남아 있습니다.',
 			);
 		}
 		const withReminders = await afterSave(saved);
-		return c.json<CreateMemosResponse>({ duplicate: false, source: withReminders.source, memos: withReminders.memos }, 201);
-	});
+		return { ok: true, status: 201, body: { duplicate: false, source: withReminders.source, memos: withReminders.memos } };
+	}
 
 	return api;
 }

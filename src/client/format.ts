@@ -66,3 +66,24 @@ export function overdueLabel(memo: Pick<Memo, 'due_at' | 'due_date'>, now = new 
 	const days = Math.round((Date.parse(`${todayKst(now)}T00:00:00Z`) - Date.parse(`${dueDay}T00:00:00Z`)) / 86_400_000);
 	return days <= 0 ? '오늘 지남' : `${days}일 지남`;
 }
+
+const kstParts = new Intl.DateTimeFormat('en-CA', {
+	timeZone: 'Asia/Seoul',
+	year: 'numeric',
+	month: '2-digit',
+	day: '2-digit',
+	hour: '2-digit',
+	minute: '2-digit',
+	hourCycle: 'h23',
+});
+
+/** A moment as the value of an <input type="datetime-local"> in Korean time ("YYYY-MM-DDTHH:mm"). */
+export function toKstInput(date: Date): string {
+	const p = Object.fromEntries(kstParts.formatToParts(date).map((x) => [x.type, x.value]));
+	return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}`;
+}
+
+/** The value of a datetime-local input, read as Korean time, as ISO 8601 with offset. */
+export function fromKstInput(value: string): string {
+	return `${value}:00+09:00`;
+}

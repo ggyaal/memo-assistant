@@ -4,7 +4,7 @@ import { pkceChallenge, sha256Hex } from '../src/server/auth/crypto.ts';
 import type { RunMemoAgent } from '../src/server/agent-runner.ts';
 import { createApi, type ApiBindings } from '../src/server/routes.ts';
 import { createSaveMemosTool, type MemoJob } from '../src/tools/save-memos.ts';
-import { CRON_LOOKAHEAD_MS, runDueReminders } from '../src/server/notify/reminders.ts';
+import { CRON_LOOKAHEAD_MS, reminderMessage, runDueReminders } from '../src/server/notify/reminders.ts';
 import { createTestD1 } from './helpers/d1.ts';
 
 /*
@@ -677,6 +677,43 @@ describe('reminders: confirm, cancel and deliver (Discord DM)', () => {
 		};
 		expect((await runDueReminders({ DB: db, DISCORD_BOT_TOKEN: 'bot-token' }, clock, fakeFetch, 10, timing)).sent).toBe(0);
 		expect(sentDms).toHaveLength(0);
+	});
+
+	it('any picked time works (before or after the deadline) if it is 4+ minutes away; 3 minutes or past is refused', async () => {
+		const { send, jar, memo } = await aliceWithMemo(); // due 2026-11-16 15:00 KST
+		clock = new Date('2026-11-16T05:00:30Z'); // 14:00:30 KST → earliest allowed 14:04
+		const at = (kst: string) => remind(send, jar, memo.id, { at: `${kst}:00+09:00`, channels: ['discord'] });
+		const code = async (res: Response) => ((await res.json()) as { error?: string }).error;
+		expect(await code(await at('2026-11-16T14:03'))).toBe('past_time'); // 3 min ahead
+		expect(await code(await at('2026-11-16T13:59'))).toBe('past_time'); // past
+		const ok = await at('2026-11-16T14:04'); // 4 min ahead
+		expect(ok.status).toBe(200);
+		expect(await ok.json()).toEqual({ scheduledAt: '2026-11-16T05:04:00.000Z' });
+		// After the deadline is fine too; it replaces the previous time.
+		expect((await at('2026-11-17T09:00')).status).toBe(200);
+		expect((await list(send, jar))[0].reminder).toMatchObject({ at: '2026-11-17T00:00:00.000Z', status: 'scheduled' });
+	});
+
+	it('only channels that can deliver are accepted (Kakao/Gmail are not yet), and at least one is needed', async () => {
+		const { send, jar, memo } = await aliceWithMemo();
+		const body = (channels: string[]) => ({ at: '2026-11-16T14:30:00+09:00', channels });
+		const err = async (channels: string[]) => {
+			const res = await remind(send, jar, memo.id, body(channels));
+			return [res.status, ((await res.json()) as { error?: string }).error];
+		};
+		expect(await err(['kakao'])).toEqual([422, 'channel_unavailable']);
+		expect(await err(['discord', 'email'])).toEqual([422, 'channel_unavailable']);
+		expect(await err([])).toEqual([422, 'invalid_request']);
+		expect(await err(['sms'])).toEqual([400, 'invalid_request']);
+		expect((await remind(send, jar, memo.id, body(['discord']))).status).toBe(200);
+	});
+
+	it('the DM wording follows the picked time: "N분 뒤" within an hour before, otherwise the memo time', async () => {
+		const memo = { title: '보고서 제출', due_at: '2026-11-16T06:00:00.000Z', due_date: '2026-11-16' };
+		expect(reminderMessage(memo, 0)).toContain('지금');
+		expect(reminderMessage(memo, 25)).toContain('25분 뒤');
+		expect(reminderMessage(memo, 180)).toBe("메모비서 🔔 '보고서 제출' 알림이에요. (11월 16일 (월) 오후 3:00)");
+		expect(reminderMessage(memo, null)).toContain('알림이에요');
 	});
 
 	it('delivers once at the right time, only to the owner, with the memo and time', async () => {

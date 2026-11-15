@@ -235,6 +235,156 @@ describe('POST /api/memos', () => {
 	});
 });
 
+describe('POST /api/memos with live progress (SSE)', () => {
+	const SSE = { accept: 'text/event-stream' };
+	type Ev = { event: string; data: Record<string, unknown> };
+
+	/** Parse a finished SSE body into events. */
+	function parseSse(text: string): Ev[] {
+		return text
+			.split('\n\n')
+			.filter((frame) => frame.trim())
+			.map((frame) => {
+				const event = /^event: (.*)$/m.exec(frame)?.[1] ?? 'message';
+				const data = frame
+					.split('\n')
+					.filter((l) => l.startsWith('data: '))
+					.map((l) => l.slice(6))
+					.join('\n');
+				return { event, data: JSON.parse(data) as Record<string, unknown> };
+			});
+	}
+	const summary = (events: Ev[]) =>
+		events.map((e) => (e.event === 'progress' ? `${e.data.stage}${e.data.count === undefined ? '' : `:${e.data.count}`}` : `${e.event}${e.data.error ? `:${e.data.error}` : ''}`));
+
+	/** Like the real runner: "analyzing" once accepted, then the tool reports its own steps. */
+	function progressRunner(memos: readonly object[] = SAMPLE_MEMOS): RunMemoAgent & { calls: MemoJob[] } {
+		const calls: MemoJob[] = [];
+		const runner: RunMemoAgent = async (job, { onProgress }) => {
+			calls.push(job);
+			onProgress?.({ stage: 'analyzing' });
+			const tool = createSaveMemosTool({ db, job, onProgress });
+			await tool.run({ data: { memos: memos as never }, toolCallId: 'test', log: console, signal: new AbortController().signal } as never);
+		};
+		return Object.assign(runner, { calls });
+	}
+
+	it('streams each real step in order, then the same result as the JSON response', async () => {
+		const app = makeApp(progressRunner());
+		const res = await app.request('/api/memos', { method: 'POST', body: body(), headers: SSE });
+		expect(res.status).toBe(200);
+		expect(res.headers.get('content-type')).toMatch(/^text\/event-stream/);
+		const events = parseSse(await res.text());
+		expect(summary(events)).toEqual(['checking', 'analyzing', 'found:3', 'saving:3', 'done']);
+		const done = events.at(-1)!.data as unknown as CreateMemosResponse;
+		expect(done.duplicate).toBe(false);
+		expect(done.memos.map((m) => m.title)).toEqual(['장보기', '병원 예약', 'AI 검색 기능']);
+		expect((await db.prepare('SELECT COUNT(*) AS n FROM memos').first<{ n: number }>())?.n).toBe(3);
+	});
+
+	it('"found" counts what is actually saved (after server checks), not what was planned', async () => {
+		const app = makeApp(progressRunner(SAMPLE_MEMOS.slice(0, 1)));
+		const events = parseSse(await (await app.request('/api/memos', { method: 'POST', body: body(), headers: SSE })).text());
+		expect(summary(events)).toEqual(['checking', 'analyzing', 'found:1', 'saving:1', 'done']);
+	});
+
+	it('stops at the failing step with the same error code and message as JSON (no AI call for refused input)', async () => {
+		const runner = progressRunner();
+		const app = makeApp(runner);
+		const secret = parseSse(await (await app.request('/api/memos', { method: 'POST', body: body('내 번호 010-1234-5678로 연락'), headers: SSE })).text());
+		expect(summary(secret)).toEqual(['checking', 'error:sensitive_info']);
+		expect(secret[1].data).toMatchObject({ status: 400 });
+		expect(runner.calls).toHaveLength(0);
+
+		const invalid = parseSse(await (await app.request('/api/memos', { method: 'POST', body: JSON.stringify({ text: '' }), headers: SSE })).text());
+		expect(summary(invalid)).toEqual(['checking', 'error:invalid_request']);
+
+		const nothing = makeApp(async (_job, { onProgress }) => onProgress?.({ stage: 'analyzing' }));
+		const notSaved = parseSse(await (await nothing.request('/api/memos', { method: 'POST', body: body(), headers: SSE })).text());
+		expect(summary(notSaved)).toEqual(['checking', 'analyzing', 'error:not_saved']);
+		expect(notSaved[2].data.message).toContain('입력한 글은 그대로');
+
+		const broken = makeApp(async () => {
+			throw new Error('TimeoutError: timed out');
+		});
+		const timeout = parseSse(await (await broken.request('/api/memos', { method: 'POST', body: body(), headers: SSE })).text());
+		expect(summary(timeout)).toEqual(['checking', 'error:agent_timeout']);
+		expect(timeout[1].data).toMatchObject({ status: 504 });
+	});
+
+	it('limits apply the same way (rate limit → error event with retry time)', async () => {
+		const app = makeApp(progressRunner(), { RATE_LIMIT_PER_MINUTE: '1' });
+		await (await app.request('/api/memos', { method: 'POST', body: body(), headers: SSE })).text();
+		const second = parseSse(await (await app.request('/api/memos', { method: 'POST', body: body(), headers: SSE })).text());
+		expect(summary(second)).toEqual(['checking', 'error:rate_limited']);
+		expect(second[1].data).toMatchObject({ status: 429 });
+		expect(second[1].data.retryAfterSeconds).toBeGreaterThan(0);
+	});
+
+	it('a retried request returns the saved result at once (no second AI call)', async () => {
+		const runner = progressRunner();
+		const app = makeApp(runner);
+		const id = newRequestId();
+		await (await app.request('/api/memos', { method: 'POST', body: body(RAW, id), headers: SSE })).text();
+		const again = parseSse(await (await app.request('/api/memos', { method: 'POST', body: body(RAW, id), headers: SSE })).text());
+		expect(summary(again)).toEqual(['checking', 'done']);
+		expect(again[1].data.duplicate).toBe(true);
+		expect(runner.calls).toHaveLength(1);
+	});
+
+	it('cross-site and non-JSON requests are still refused before any stream starts', async () => {
+		const app = makeApp(progressRunner());
+		const foreign = await app.request('/api/memos', { method: 'POST', body: body(), headers: { ...SSE, origin: 'https://evil.example' } });
+		expect(foreign.status).toBe(403);
+		const plain = await app.request('/api/memos', { method: 'POST', body: body(), headers: { ...SSE, 'content-type': 'text/plain' } });
+		expect(plain.status).toBe(415);
+	});
+
+	it('"취소" stops the agent of that request (protected like other changes); nothing to stop once saved', async () => {
+		const cancelled: string[] = [];
+		const app = new Hono<{ Bindings: ApiBindings }>();
+		app.route('/api', createApi({ runAgent: toolRunner(db), now: () => clock, cancelAgent: async (id) => (cancelled.push(id), true) }));
+		const req = (payload: unknown, headers: Record<string, string> = {}) =>
+			app.request('/api/memos/cancel', { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(payload) }, { DB: db });
+		const id = newRequestId();
+		const res = await req({ requestId: id });
+		expect(await res.json()).toEqual({ cancelled: true, saved: false });
+		expect(cancelled).toEqual([id]);
+		expect((await req({ requestId: 'not-a-uuid' })).status).toBe(400);
+		expect((await req({ requestId: id }, { origin: 'https://evil.example' })).status).toBe(403);
+		// Finished first: report it as saved instead of pretending to cancel.
+		const done = newRequestId();
+		await app.request('/api/memos', { method: 'POST', headers: { 'content-type': 'application/json' }, body: body(RAW, done) }, { DB: db });
+		expect(await (await req({ requestId: done })).json()).toEqual({ cancelled: false, saved: true });
+		expect(cancelled).toEqual([id]);
+	});
+
+	it('closing the stream cancels the AI run; nothing is saved', async () => {
+		let resolveAborted!: () => void;
+		const aborted = new Promise<void>((r) => (resolveAborted = r));
+		let saved = false;
+		const app = makeApp(async (job, { onProgress, signal }) => {
+			onProgress?.({ stage: 'analyzing' });
+			await new Promise<void>((_resolve, reject) => {
+				signal?.addEventListener('abort', () => {
+					resolveAborted();
+					reject(signal.reason);
+				});
+			});
+			saved = true;
+			void job;
+		});
+		const res = await app.request('/api/memos', { method: 'POST', body: body(), headers: SSE });
+		const reader = res.body!.getReader();
+		let seen = '';
+		while (!seen.includes('analyzing')) seen += new TextDecoder().decode((await reader.read()).value);
+		await reader.cancel();
+		await aborted;
+		expect(saved).toBe(false);
+		expect((await db.prepare('SELECT COUNT(*) AS n FROM sources').first<{ n: number }>())?.n).toBe(0);
+	});
+});
+
 describe('GET /api/agenda', () => {
 	type Agenda = { reminders: { title: string; due_at: string | null; due_date: string | null }[]; ranked: { title: string; priority: string | null }[] };
 	const agenda = async (app: ReturnType<typeof makeApp>) => (await (await app.request('/api/agenda')).json()) as Agenda;

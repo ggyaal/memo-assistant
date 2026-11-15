@@ -113,6 +113,42 @@ describe('MemoOrganizer agent (faux model, real Flue runtime + local D1)', () =>
 		expect(prompt).not.toContain(json.source.id);
 	});
 
+	it('streams real progress from the running agent: accepted → tool found N → saving (useDataWriter)', async () => {
+		faux.setResponses([
+			respond(
+				fauxAssistantMessage(
+					fauxToolCall('save_memos', {
+						memos: [
+							{ title: '장보기', content: '오늘 장보기', category: 'todo', due_at: null, due_text: '오늘', reminder_recommended: false },
+							{ title: '회의 준비', content: '내일 회의 자료 만들기', category: 'todo', due_at: null, due_text: '내일', reminder_recommended: false },
+						],
+					}),
+					{ stopReason: 'toolUse' },
+				),
+			),
+			respond(fauxAssistantMessage(fauxText('저장했습니다.'))),
+		]);
+		const app = new Hono<{ Bindings: ApiBindings }>();
+		app.route('/api', createApi({ runAgent: runMemoAgent, now: () => NOW, agentTimeoutMs: 20_000 }));
+		const res = await app.request(
+			'/api/memos',
+			{
+				method: 'POST',
+				headers: { 'content-type': 'application/json', accept: 'text/event-stream' },
+				body: JSON.stringify({ nickname: '진행테스트', text: '오늘 장보고 내일 회의 자료 만들기', requestId: requestId() }),
+			},
+			{ DB: db, RATE_LIMIT_PER_MINUTE: '100', DAILY_AI_LIMIT: '100' },
+		);
+		const text = await res.text();
+		const events = [...text.matchAll(/event: (\w+)\ndata: (.*)/g)].map(([, event, data]) => {
+			const d = JSON.parse(data) as { stage?: string; count?: number; memos?: unknown[] };
+			return event === 'progress' ? `${d.stage}${d.count === undefined ? '' : `:${d.count}`}` : `${event}:${d.memos?.length}`;
+		});
+		expect(events).toEqual(['checking', 'analyzing', 'found:2', 'saving:2', 'done:2']);
+		// The model never sees the progress data part.
+		expect(seenPrompts.join('')).not.toContain('"stage"');
+	});
+
 	it('returns not_saved when the model answers without calling the tool', async () => {
 		faux.setResponses([respond(fauxAssistantMessage(fauxText('정리했어요!')))]);
 		const send = makeApp();

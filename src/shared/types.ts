@@ -82,6 +82,22 @@ export interface ReminderRequest {
 	leadMinutes?: number;
 	/** For date-only memos: the time of day (HH:MM, KST) to be reminded. */
 	time?: string;
+	/** Any reminder time the person picked (ISO 8601 with offset, e.g. "2026-11-16T14:30:00+09:00"). */
+	at?: string;
+	/** Where to send it. Only channels that can deliver are accepted (today: discord). */
+	channels?: NotificationChannel[];
+}
+
+/**
+ * A reminder must be at least this many whole minutes after the current minute:
+ * up to 3 minutes ahead (and anything past) is refused, 4 minutes or more is fine.
+ */
+export const REMINDER_MIN_LEAD_MINUTES = 4;
+
+/** Earliest allowed reminder time for `now` (start of the current minute + 4 minutes). */
+export function earliestReminderTime(now: Date): Date {
+	const minute = Math.floor(now.getTime() / 60_000) * 60_000;
+	return new Date(minute + REMINDER_MIN_LEAD_MINUTES * 60_000);
 }
 
 export interface CompleteRequest {
@@ -147,9 +163,30 @@ export type ApiErrorCode =
 	| 'empty_transcript'
 	| 'transcribe_failed'
 	| 'conflict'
+	| 'cancelled'
 	| 'db_error';
 
 export interface ApiError {
 	error: ApiErrorCode;
 	message: string;
+}
+
+/**
+ * Live progress of one "AI로 정리하기" request (POST /api/memos with
+ * `Accept: text/event-stream`). Every stage is sent when that step really
+ * happens on the server — never on a timer.
+ * - checking: the server is validating the input (schema, sensitive data, limits)
+ * - analyzing: the agent accepted the request and the model is working
+ * - found: save_memos was called with `count` memos (after server sanitizing)
+ * - saving: those memos are being written to D1
+ */
+export type MemoProgressStage = 'checking' | 'analyzing' | 'found' | 'saving';
+export interface MemoProgressEvent {
+	stage: MemoProgressStage;
+	count?: number;
+}
+/** SSE `error` event: same fields as the JSON error, plus the HTTP status it stands for. */
+export interface MemoStreamError extends ApiError {
+	status: number;
+	retryAfterSeconds?: number;
 }
