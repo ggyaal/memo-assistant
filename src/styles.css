@@ -1742,3 +1742,23 @@ button.danger:disabled {
 	overscroll-behavior: contain;
 	padding-right: 4px;
 }
+
+/* "전체 메모" grouped by day */
+.day-group {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+.day-group + .day-group {
+	margin-top: 12px;
+}
+.day-group__title {
+	position: sticky;
+	top: 0;
+	z-index: 1;
+	margin: 0;
+	padding: 6px 2px;
+	font-size: 0.95rem;
+	background: var(--bg);
+	border-bottom: 1px solid var(--border);
+}
