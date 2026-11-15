@@ -60,3 +60,36 @@ export async function sendDiscordDm(token: string, recipientId: string, content:
 		return { ok: false, retryable: true, code: 'network', message: `Discord에 연결하지 못했어요: ${String(error).slice(0, 80)}` };
 	}
 }
+
+/**
+ * Is this Discord user a member of the server where the reminder bot lives?
+ * Bots can only DM users who share a server with them, so the Discord channel stays
+ * locked until this says "member". GET /guilds/{guild}/members/{user} needs no
+ * privileged intent; 404 (10007 Unknown Member) means "not joined".
+ * Anything else (bot not in the server, rate limit, network) is "unknown": the caller
+ * falls back to the test-DM check instead of guessing.
+ */
+export type GuildMembership = 'member' | 'not_member' | 'unknown';
+
+export async function checkGuildMember(
+	token: string,
+	guildId: string,
+	userId: string,
+	fetchFn: typeof fetch,
+): Promise<GuildMembership> {
+	try {
+		const res = await fetchFn(`${API}/guilds/${encodeURIComponent(guildId)}/members/${encodeURIComponent(userId)}`, {
+			headers: { Authorization: `Bot ${token}` },
+			signal: AbortSignal.timeout(5000),
+		});
+		if (res.ok) return 'member';
+		if (res.status === 404) {
+			const body = (await res.json().catch(() => ({}))) as { code?: number };
+			// 10007 Unknown Member. 10004 Unknown Guild = wrong server id → unknown, not "not joined".
+			return body.code === 10007 ? 'not_member' : 'unknown';
+		}
+		return 'unknown';
+	} catch {
+		return 'unknown';
+	}
+}

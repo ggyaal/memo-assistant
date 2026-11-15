@@ -322,7 +322,7 @@ export function createApi(deps: ApiDeps) {
 			displayName: user.displayName,
 			timezone: 'Asia/Seoul',
 			linked,
-			notifications: await channelStatuses(c.env.DB, c.env, user.userId, linked),
+			notifications: await channelStatuses(c.env.DB, c.env, user.userId, linked, fetchFn),
 			reminderDefaults: await getReminderDefaults(c.env.DB, user.userId),
 		});
 	});
@@ -370,7 +370,7 @@ export function createApi(deps: ApiDeps) {
 		const limited = await mutationLimit(c, now());
 		if (limited) return limited;
 		const result = await setChannel(c.env.DB, c.env, user.userId, channel as Channel, parsed.output.enabled, now(), fetchFn);
-		const status = (await channelStatuses(c.env.DB, c.env, user.userId)).find((s) => s.channel === channel)!;
+		const status = (await channelStatuses(c.env.DB, c.env, user.userId, undefined, fetchFn)).find((s) => s.channel === channel)!;
 		if (!result.ok) return c.json({ error: result.code === 'unavailable' ? 'channel_unavailable' : 'test_failed', message: result.message, status }, 409);
 		const scheduled =
 			channel === 'discord' && parsed.output.enabled

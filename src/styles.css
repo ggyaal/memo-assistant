@@ -772,6 +772,36 @@ button:disabled {
 .settings__channel-label {
 	font-weight: 600;
 }
+.server-join {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	margin: 4px 0;
+	padding: 8px 10px;
+	border-radius: 8px;
+	background: var(--bg);
+	border: 1px solid var(--border);
+}
+.server-join--needed {
+	border-color: #5865f2;
+}
+.server-join--ok {
+	display: block;
+	padding: 0;
+	border: 0;
+	background: none;
+	color: var(--todo);
+}
+.server-join__actions {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 8px 12px;
+}
+.server-join__link {
+	display: inline-block;
+	text-decoration: none;
+}
 .badge--linked {
 	color: var(--todo);
 }

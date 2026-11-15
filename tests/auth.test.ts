@@ -27,11 +27,24 @@ const ENV: Partial<ApiBindings> = {
 	GOOGLE_CLIENT_SECRET: 'google-secret',
 	RATE_LIMIT_PER_MINUTE: '100',
 	DISCORD_BOT_TOKEN: 'bot-token',
+	DISCORD_GUILD_ID: 'guild-1',
+	DISCORD_SERVER_INVITE: 'https://discord.gg/memo-test',
 	// Kakao intentionally not configured.
 };
 
+/** Discord member lookups the fake bot API received: "guild/user (auth)". */
+const memberChecks: string[] = [];
+
 const fakeFetch: typeof fetch = async (input, init) => {
 	const url = String(input instanceof Request ? input.url : input);
+	// Fake guild member lookup: "outsider" has not joined; "unsure" makes Discord fail (cannot check).
+	const member = /^https:\/\/discord\.com\/api\/v10\/guilds\/([^/]+)\/members\/(.+)$/.exec(url);
+	if (member) {
+		memberChecks.push(`${member[1]}/${member[2]} (${new Headers(init?.headers).get('authorization')})`);
+		if (member[2] === 'outsider') return Response.json({ code: 10007, message: 'Unknown Member' }, { status: 404 });
+		if (member[2] === 'unsure') return new Response('oops', { status: 500 });
+		return Response.json({ user: { id: member[2] } });
+	}
 	// Fake Discord bot API. Recipients named "blocked" refuse DMs; "flaky" returns 500.
 	if (url === 'https://discord.com/api/v10/users/@me/channels') {
 		const { recipient_id } = JSON.parse(String(init?.body)) as { recipient_id: string };
@@ -79,13 +92,13 @@ const runAgent: RunMemoAgent = async (job: MemoJob) => {
 
 type Jar = Map<string, string>;
 
-function makeApp() {
+function makeApp(envOverride: Partial<ApiBindings> = {}) {
 	const app = new Hono<{ Bindings: ApiBindings }>();
 	app.route('/api', createApi({ runAgent, now: () => clock, fetchFn: fakeFetch }));
 	return async (path: string, init: RequestInit & { jar?: Jar } = {}) => {
 		const headers = new Headers(init.headers);
 		if (init.jar?.size) headers.set('cookie', [...init.jar].map(([k, v]) => `${k}=${v}`).join('; '));
-		const res = await app.request(path, { ...init, headers }, { DB: db, ...ENV });
+		const res = await app.request(path, { ...init, headers }, { DB: db, ...ENV, ...envOverride });
 		if (init.jar) {
 			for (const line of res.headers.getSetCookie()) {
 				const [pair] = line.split(';');
@@ -486,6 +499,69 @@ describe('Discord channel: test DM gate', () => {
 		expect(row).toEqual({ enabled: 0, verified_at: null });
 		await toggle(send, jar, true);
 		expect(sentDms).toHaveLength(2);
+	});
+});
+
+describe('Discord channel: must join the bot\'s server first', () => {
+	const json = { 'content-type': 'application/json' };
+	type Discord = { available: boolean; enabled: boolean; note: string; server?: { joined: boolean | null; inviteUrl: string | null } };
+	const discordStatus = async (send: Send, jar: Jar) =>
+		((await (await send('/api/settings', { jar })).json()) as { notifications: (Discord & { channel: string })[] }).notifications.find(
+			(n) => n.channel === 'discord',
+		)!;
+	const toggle = (send: Send, jar: Jar, enabled: boolean) =>
+		send('/api/settings/notifications/discord', { method: 'PUT', jar, headers: json, body: JSON.stringify({ enabled }) });
+
+	it('locks the switch and offers the invite until the user joins; the server re-checks on enable', async () => {
+		const send = makeApp();
+		const jar = (await login(send, 'discord', 'outsider')).jar;
+		memberChecks.length = 0;
+		const status = await discordStatus(send, jar);
+		expect(status).toMatchObject({ available: false, enabled: false, server: { joined: false, inviteUrl: 'https://discord.gg/memo-test' } });
+		expect(status.note).toContain('서버에 가입');
+		expect(memberChecks).toEqual(['guild-1/outsider (Bot bot-token)']);
+		// A crafted request cannot skip the step: no test DM, stays off.
+		const res = await toggle(send, jar, true);
+		expect(res.status).toBe(409);
+		expect(((await res.json()) as { error: string }).error).toBe('channel_unavailable');
+		expect(sentDms).toHaveLength(0);
+	});
+
+	it('unlocks for members and shows that they joined', async () => {
+		const send = makeApp();
+		const jar = (await login(send, 'discord', 'alice')).jar;
+		expect(await discordStatus(send, jar)).toMatchObject({ available: true, server: { joined: true } });
+		expect((await toggle(send, jar, true)).status).toBe(200);
+		expect(sentDms).toHaveLength(1);
+	});
+
+	it('when Discord cannot answer, it does not guess: the test DM decides', async () => {
+		const send = makeApp();
+		const jar = (await login(send, 'discord', 'unsure')).jar;
+		expect(await discordStatus(send, jar)).toMatchObject({ available: true, server: { joined: null } });
+		expect((await toggle(send, jar, true)).status).toBe(200);
+	});
+
+	it('someone who left the server shows as off (not "receiving") until they join again', async () => {
+		const send = makeApp();
+		const jar = (await login(send, 'discord', 'outsider')).jar;
+		await db
+			.prepare("INSERT INTO notification_preferences (user_id, channel, enabled, verified_at, updated_at) SELECT user_id, 'discord', 1, ?, ? FROM oauth_accounts WHERE provider_subject = 'outsider'")
+			.bind(clock.toISOString(), clock.toISOString())
+			.run();
+		expect(await discordStatus(send, jar)).toMatchObject({ available: false, enabled: false });
+		// Turning off is still allowed.
+		expect((await toggle(send, jar, false)).status).toBe(200);
+	});
+
+	it('without a server id configured, nothing is checked and the test DM decides (previous behavior)', async () => {
+		const send = makeApp({ DISCORD_GUILD_ID: undefined });
+		const jar = (await login(send, 'discord', 'outsider')).jar;
+		memberChecks.length = 0;
+		const status = await discordStatus(send, jar);
+		expect(status.available).toBe(true);
+		expect(status.server).toBeUndefined();
+		expect(memberChecks).toEqual([]);
 	});
 });
 

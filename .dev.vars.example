@@ -14,6 +14,8 @@ DISCORD_CLIENT_SECRET=
 DISCORD_BOT_TOKEN=
 # Optional: public invite link to that server, shown to users who cannot receive DMs yet.
 DISCORD_SERVER_INVITE=
+# Server (guild) id of that server: Discord notifications unlock only after the user joins it.
+DISCORD_GUILD_ID=
 
 # Google Cloud Console → APIs & Services → Credentials → OAuth client (Web) (scopes: openid profile)
 GOOGLE_CLIENT_ID=

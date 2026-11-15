@@ -96,7 +96,7 @@ npm run test:worker   # 빌드한 Worker를 workerd + 로컬 D1에서 실행 (AI
 - 비밀값 이름: `DISCORD_CLIENT_ID`, `DISCORD_CLIENT_SECRET`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `KAKAO_REST_API_KEY`, `KAKAO_CLIENT_SECRET`(선택)
 - 각 개발자 콘솔에 등록할 리디렉션 URI: `http://localhost:5173/api/auth/<provider>/callback`, `https://memo-assistant.ggyaal.workers.dev/api/auth/<provider>/callback`
 - 로그인 후 **⚙️ 설정**: 닉네임 변경, 계정 연결, 알림 받을 경로 토글(Discord DM / 카카오톡·Gmail — 비활성). Discord는 켤 때 **테스트 DM이 실제로 도착해야** 켜집니다(알림 봇과 같은 서버에 있어야 함).
-- **Discord 알림**: AI가 알림을 추천한 개인 메모는 **자동으로 예약**되고(정확한 시각 → 기본 30분 전, 날짜만 있는 메모 → 설정에서 시각을 정한 경우만), **다가오는 알림** 창의 스위치로 끌 수 있습니다(끈 알림은 다시 자동으로 켜지지 않음). 메모 카드에서도 직접 예약할 수 있습니다(정확한 시각이 있으면 정시·10·30·60분 전, 날짜만 있으면 시각을 직접 선택). Cron(1분 간격)이 발송하고, 보내기 직전에 완료·삭제·채널 상태를 다시 확인하며, 같은 알림은 한 번만 보냅니다. 비밀값 `DISCORD_BOT_TOKEN`, 선택 변수 `DISCORD_SERVER_INVITE`.
+- **Discord 알림**: AI가 알림을 추천한 개인 메모는 **자동으로 예약**되고(정확한 시각 → 기본 30분 전, 날짜만 있는 메모 → 설정에서 시각을 정한 경우만), **다가오는 알림** 창의 스위치로 끌 수 있습니다(끈 알림은 다시 자동으로 켜지지 않음). 메모 카드에서도 직접 예약할 수 있습니다(정확한 시각이 있으면 정시·10·30·60분 전, 날짜만 있으면 시각을 직접 선택). Cron(1분 간격)이 발송하고, 보내기 직전에 완료·삭제·채널 상태를 다시 확인하며, 같은 알림은 한 번만 보냅니다. 비밀값 `DISCORD_BOT_TOKEN`, 변수 `DISCORD_GUILD_ID`(봇이 있는 서버 ID)·`DISCORD_SERVER_INVITE`(초대 링크). 봇은 같은 서버 멤버에게만 DM을 보낼 수 있으므로, `DISCORD_GUILD_ID`가 있으면 설정 화면이 서버 가입 여부를 봇 API로 확인하고 미가입이면 초대 링크를 보여 주며 스위치를 잠급니다(서버도 켜기 요청 때 다시 확인). 확인이 안 될 때는 테스트 DM으로 판단합니다.
 
 ## 설정 (환경 변수 이름만 — 비밀값 없음)
 `wrangler.jsonc`의 `vars`로 조정합니다. 비밀값(secret)은 필요하지 않습니다.

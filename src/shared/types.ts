@@ -103,6 +103,8 @@ export interface ChannelStatus {
 	/** False until real delivery (bot DM + scheduler) exists. */
 	delivering: boolean;
 	note: string;
+	/** Discord only: the user must join the bot's server first. joined null = could not check. */
+	server?: { joined: boolean | null; inviteUrl: string | null };
 }
 
 export interface SettingsResponse {

@@ -28,7 +28,9 @@
 		"DAILY_AI_LIMIT": "150",
 		// Estimated Neurons/day for memo organizing (30 + 0.4 × chars per request).
 		// With voice (30 min ≈ 1,400) this leaves ~2,600 of the 10,000 free Neurons in reserve.
-		"DAILY_AI_NEURONS": "6000"
+		"DAILY_AI_NEURONS": "6000",
+    "DISCORD_GUILD_ID": "1571477194499293205",
+    "DISCORD_SERVER_INVITE": "https://discord.gg/uR5xYg3NE2"
 	},
 	// Every minute: deliver due Discord reminders (src/cloudflare.ts → scheduled).
 	// Workers Free allows 5 cron triggers per account; this uses 1.

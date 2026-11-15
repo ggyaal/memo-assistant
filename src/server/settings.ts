@@ -2,13 +2,21 @@
 // Channel availability is decided here (server side), never by the client.
 import type { Provider } from './auth/providers.ts';
 import { linkedProviders } from './auth/store.ts';
-import { sendDiscordDm } from './notify/discord.ts';
+import { checkGuildMember, sendDiscordDm } from './notify/discord.ts';
 import { discordRecipient } from './notify/reminders.ts';
 
 export interface SettingsEnv {
 	DISCORD_BOT_TOKEN?: string;
 	/** Optional public invite to the server where the reminder bot lives. */
 	DISCORD_SERVER_INVITE?: string;
+	/** Server (guild) id where the bot lives. When set, Discord stays locked until the user joins it. */
+	DISCORD_GUILD_ID?: string;
+}
+
+/** Discord server membership as shown in settings. `joined: null` = could not check right now. */
+export interface DiscordServerStatus {
+	joined: boolean | null;
+	inviteUrl: string | null;
 }
 
 export const CHANNELS = ['discord', 'kakao', 'email'] as const;
@@ -23,6 +31,8 @@ export interface ChannelStatus {
 	/** Whether messages are actually delivered yet (false until the sender exists). */
 	delivering: boolean;
 	note: string;
+	/** Discord only, when DISCORD_GUILD_ID is set: must the user join the bot's server first? */
+	server?: DiscordServerStatus;
 }
 
 const LABELS: Record<Channel, string> = { discord: 'Discord DM', kakao: '카카오톡', email: 'Gmail(이메일)' };
@@ -39,6 +49,7 @@ export async function channelStatuses(
 	env: SettingsEnv,
 	userId: string,
 	linked?: Provider[],
+	fetchFn?: typeof fetch,
 ): Promise<ChannelStatus[]> {
 	const providers = linked ?? (await linkedProviders(db, userId));
 	const { results } = await db
@@ -46,26 +57,40 @@ export async function channelStatuses(
 		.bind(userId)
 		.all<{ channel: Channel; enabled: number; verified_at: string | null }>();
 	const saved = new Map(results.map((r) => [r.channel, r]));
+	const linkedDiscord = providers.includes('discord');
+	const bot = !!env.DISCORD_BOT_TOKEN;
+	// Bots can only DM users who share a server with them: check membership on the server side.
+	let server: DiscordServerStatus | undefined;
+	if (linkedDiscord && bot && env.DISCORD_GUILD_ID && fetchFn) {
+		const recipient = await discordRecipient(db, userId);
+		const membership = recipient ? await checkGuildMember(env.DISCORD_BOT_TOKEN!, env.DISCORD_GUILD_ID, recipient, fetchFn) : 'unknown';
+		server = { joined: membership === 'unknown' ? null : membership === 'member', inviteUrl: env.DISCORD_SERVER_INVITE || null };
+	}
 	return CHANNELS.map((channel) => {
 		if (channel === 'discord') {
-			const linkedDiscord = providers.includes('discord');
-			const bot = !!env.DISCORD_BOT_TOKEN;
 			const row = saved.get('discord');
-			const on = linkedDiscord && bot && row?.enabled === 1 && !!row.verified_at;
-			return {
+			const notJoined = server?.joined === false;
+			const on = linkedDiscord && bot && !notJoined && row?.enabled === 1 && !!row.verified_at;
+			const status: ChannelStatus = {
 				channel,
 				label: LABELS.discord,
-				available: linkedDiscord && bot,
+				available: linkedDiscord && bot && !notJoined,
 				enabled: on,
 				delivering: on,
 				note: !linkedDiscord
 					? 'Discord 계정을 먼저 연결해야 켤 수 있어요.'
 					: !bot
 						? '알림 봇이 아직 설정되지 않아 켤 수 없어요.'
-						: on
-							? '메모에서 "알림 받기"로 예약하면 그 시각에 DM으로 보내 드려요.'
-							: `켜면 확인용 테스트 DM을 먼저 보내요. 알림 봇이 있는 서버에 참여해 있어야 받을 수 있어요.${env.DISCORD_SERVER_INVITE ? ` 참여: ${env.DISCORD_SERVER_INVITE}` : ''}`,
+						: notJoined
+							? '알림 봇이 있는 Discord 서버에 가입해야 켤 수 있어요.'
+							: on
+								? '메모에서 "알림 받기"로 예약하면 그 시각에 DM으로 보내 드려요.'
+								: server
+									? '켜면 확인용 테스트 DM을 먼저 보내요.'
+									: `켜면 확인용 테스트 DM을 먼저 보내요. 알림 봇이 있는 서버에 참여해 있어야 받을 수 있어요.${env.DISCORD_SERVER_INVITE ? ` 참여: ${env.DISCORD_SERVER_INVITE}` : ''}`,
 			};
+			if (server) status.server = server;
+			return status;
 		}
 		return {
 			channel,
@@ -94,7 +119,8 @@ export async function setChannel(
 	now: Date,
 	fetchFn: typeof fetch,
 ): Promise<ToggleResult> {
-	const status = (await channelStatuses(db, env, userId)).find((s) => s.channel === channel)!;
+	// Enabling re-checks availability (incl. server membership) on the server; disabling is always allowed.
+	const status = (await channelStatuses(db, env, userId, undefined, enabled ? fetchFn : undefined)).find((s) => s.channel === channel)!;
 	if (enabled && !status.available) return { ok: false, code: 'unavailable', message: status.note };
 	let verifiedAt: string | null = null;
 	if (enabled && channel === 'discord') {

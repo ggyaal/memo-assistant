@@ -69,6 +69,31 @@ export function SettingsPage({ me, onBack, onProfileChanged }: { me: MeResponse;
 		}
 	}
 
+	// Re-check channel states (e.g. after joining the Discord server). Keeps the rest of the form as typed.
+	const [checking, setChecking] = useState(false);
+	async function recheckChannels() {
+		setChecking(true);
+		try {
+			const fresh = await fetchSettings();
+			setSettings((s) => (s ? { ...s, notifications: fresh.notifications } : fresh));
+		} catch {
+			// keep what is shown; the next check will try again
+		} finally {
+			setChecking(false);
+		}
+	}
+
+	// Coming back from the Discord invite tab: check again so the switch unlocks by itself.
+	const waitingForJoin = settings?.notifications.some((n) => n.server?.joined === false) ?? false;
+	useEffect(() => {
+		if (!waitingForJoin) return;
+		const onVisible = () => {
+			if (document.visibilityState === 'visible') void recheckChannels();
+		};
+		document.addEventListener('visibilitychange', onVisible);
+		return () => document.removeEventListener('visibilitychange', onVisible);
+	}, [waitingForJoin]);
+
 	const replaceChannel = (next: ChannelStatus) =>
 		setSettings((s) => (s ? { ...s, notifications: s.notifications.map((n) => (n.channel === next.channel ? next : n)) } : s));
 
@@ -188,7 +213,10 @@ export function SettingsPage({ me, onBack, onProfileChanged }: { me: MeResponse;
 											<label htmlFor={id} className="settings__channel-label">
 												{status.label}
 											</label>
-											<span className="muted small">{status.note}</span>
+											{status.server && (
+												<DiscordServerJoin server={status.server} checking={checking} onRecheck={() => void recheckChannels()} />
+											)}
+											{status.server?.joined !== false && <span className="muted small">{status.note}</span>}
 											{status.enabled && !status.delivering && <span className="badge badge--pending">발송 준비 중</span>}
 											{status.delivering && <span className="badge badge--linked">알림 받는 중</span>}
 											{channelBusy === status.channel && status.channel === 'discord' && (
@@ -252,5 +280,37 @@ export function SettingsPage({ me, onBack, onProfileChanged }: { me: MeResponse;
 				</>
 			)}
 		</section>
+	);
+}
+
+/** Step before the Discord switch: join the bot's server (bots can only DM members of a shared server). */
+function DiscordServerJoin({
+	server,
+	checking,
+	onRecheck,
+}: {
+	server: NonNullable<ChannelStatus['server']>;
+	checking: boolean;
+	onRecheck: () => void;
+}) {
+	if (server.joined === true) {
+		return <span className="server-join server-join--ok small">✅ 알림 봇이 있는 Discord 서버에 가입되어 있어요.</span>;
+	}
+	return (
+		<span className={`server-join small${server.joined === false ? ' server-join--needed' : ''}`} role="status">
+			{server.joined === false
+				? '알림 봇이 있는 Discord 서버에 먼저 가입해 주세요. 봇은 같은 서버 멤버에게만 DM을 보낼 수 있어요. 가입하면 스위치를 켤 수 있어요.'
+				: '서버 가입 여부를 지금 확인하지 못했어요. 켜면 테스트 DM으로 다시 확인해요.'}
+			<span className="server-join__actions">
+				{server.joined === false && server.inviteUrl && (
+					<a className="primary small server-join__link" href={server.inviteUrl} target="_blank" rel="noopener noreferrer">
+						Discord 서버 가입하기 ↗
+					</a>
+				)}
+				<button type="button" className="link-button" disabled={checking} onClick={onRecheck}>
+					{checking ? '확인하는 중…' : '가입 다시 확인'}
+				</button>
+			</span>
+		</span>
 	);
 }
