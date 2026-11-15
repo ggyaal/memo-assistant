@@ -8,6 +8,18 @@ import { LIMITS, type CreateMemosResponse } from '../shared/types.ts';
 
 const EXAMPLE = '오늘 장 보고, 내일 오후 3시에 병원 예약해야 해. AI 검색 기능 아이디어도 메모해 줘.';
 
+/** Playful labels for the voice button while the card is folded; one is picked per visit. */
+export const VOICE_PROMPTS = [
+	'주저리.. 주저리..',
+	'그 뭐더라...',
+	'아 맞다! 그거...',
+	'음... 오늘 할 일이...',
+	'까먹기 전에 한마디!',
+	'중얼중얼...',
+	'잠깐, 이것도 적어 줘',
+	'생각나는 대로 말해 보세요',
+] as const;
+
 export function MemoInput({
 	nickname,
 	onCreated,
@@ -29,6 +41,11 @@ export function MemoInput({
 	// Reused only when retrying the same text, so the server can de-duplicate.
 	const pendingRequest = useRef<{ text: string; requestId: string } | null>(null);
 	// Live steps reported by the server (null = nothing to show).
+	// Folded by default: only the voice button shows. Typed text, a run or an error keep it open.
+	const [expanded, setExpanded] = useState(false);
+	const [voicePrompt] = useState(() => VOICE_PROMPTS[Math.floor(Math.random() * VOICE_PROMPTS.length)]);
+	// Focus the text box once it exists after the person opened the card (or voice text arrived).
+	const focusWhenOpen = useRef(false);
 	const [progress, setProgress] = useState<{ stage: OrganizeStage; count: number | null; failed: boolean } | null>(null);
 	const inFlight = useRef<AbortController | null>(null);
 
@@ -87,20 +104,71 @@ export function MemoInput({
 		}
 	}
 
+	const open = expanded || pending || !!text.trim() || !!error || !!progress;
+	useEffect(() => {
+		if (open && focusWhenOpen.current) {
+			focusWhenOpen.current = false;
+			textarea.current?.focus();
+		}
+	}, [open, text]);
+
+	const voice = (
+		<VoiceRecorder
+			disabled={pending}
+			idleLabel={open ? '음성으로 입력' : voicePrompt}
+			onBusyChange={setVoiceBusy}
+			onTranscript={(spoken) => {
+				// Append to whatever is already typed; open the card so the person reviews before submitting.
+				setText((current) => (current.trim() ? `${current.trim()} ${spoken}` : spoken).slice(0, LIMITS.textMax));
+				focusWhenOpen.current = true;
+				setExpanded(true);
+			}}
+		/>
+	);
+
+	if (!open) {
+		return (
+			<section className="card memo-input memo-input--folded" aria-label="메모 입력">
+				<div className="memo-input__folded">
+					{voice}
+					<button
+						type="button"
+						className="link-button small memo-input__toggle"
+						aria-expanded={false}
+						onClick={() => {
+							focusWhenOpen.current = true;
+							setExpanded(true);
+						}}
+					>
+						⌨️ 글로 쓰기 ▾
+					</button>
+				</div>
+			</section>
+		);
+	}
+
 	return (
-		<form className="card" onSubmit={submit}>
-			<label htmlFor="memo-text" className="label">
-				여러 생각을 한 번에 적어 보세요
-			</label>
-			<VoiceRecorder
-				disabled={pending}
-				onBusyChange={setVoiceBusy}
-				onTranscript={(spoken) => {
-					// Append to whatever is already typed; the user reviews before submitting.
-					setText((current) => (current.trim() ? `${current.trim()} ${spoken}` : spoken).slice(0, LIMITS.textMax));
-					textarea.current?.focus();
-				}}
-			/>
+		<form id="memo-input-form" className="card memo-input" onSubmit={submit}>
+			<div className="row space-between">
+				<label htmlFor="memo-text" className="label">
+					여러 생각을 한 번에 적어 보세요
+				</label>
+				<button
+					type="button"
+					className="link-button small memo-input__toggle"
+					aria-expanded={true}
+					disabled={pending || !!text.trim()}
+					title={text.trim() ? '입력한 글이 있으면 접을 수 없어요' : undefined}
+					onClick={() => {
+						setExpanded(false);
+						setError(null);
+						setProgress(null);
+					}}
+				>
+					접기 ▴
+				</button>
+			</div>
+			{voice}
 			<textarea
 				ref={textarea}
 				id="memo-text"

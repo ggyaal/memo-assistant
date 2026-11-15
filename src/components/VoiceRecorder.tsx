@@ -50,10 +50,13 @@ export function VoiceRecorder({
 	onTranscript,
 	onBusyChange,
 	disabled,
+	idleLabel = '음성으로 입력',
 }: {
 	onTranscript: (text: string) => void;
 	onBusyChange: (busy: boolean) => void;
 	disabled?: boolean;
+	/** Text on the button while idle (the button is always announced as "음성으로 입력"). */
+	idleLabel?: string;
 }) {
 	const [phase, setPhase] = useState<Phase>('idle');
 	const [seconds, setSeconds] = useState(0);
@@ -191,7 +194,7 @@ export function VoiceRecorder({
 				? '마이크 준비 중…'
 				: phase === 'transcribing'
 					? '글로 바꾸는 중…'
-					: '🎙️ 음성으로 입력';
+					: `🎙️ ${idleLabel}`;
 
 	return (
 		<div className="voice">
@@ -201,6 +204,7 @@ export function VoiceRecorder({
 				onClick={onClick}
 				disabled={disabled || phase === 'starting' || phase === 'transcribing'}
 				aria-pressed={phase === 'recording'}
+				aria-label={phase === 'idle' || phase === 'intro' ? `음성으로 입력 — ${idleLabel}` : undefined}
 			>
 				{phase === 'recording' && <span className="voice__dot" aria-hidden="true" />}
 				{label}

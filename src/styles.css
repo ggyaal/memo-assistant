@@ -1465,3 +1465,22 @@ p.reminder {
 		font-weight: 700;
 	}
 }
+
+/* Memo input: folded = just the voice button (with a playful label) */
+.memo-input__folded {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px 12px;
+}
+.memo-input__folded .voice {
+	flex: 1 1 auto;
+	min-width: 0;
+}
+.memo-input__folded .voice__button {
+	max-width: 100%;
+}
+.memo-input__toggle {
+	flex: none;
+}
