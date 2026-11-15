@@ -45,7 +45,8 @@ export function createSaveMemosTool(deps: {
 		input: SaveMemosInputSchema,
 		async run({ data }) {
 			const now = new Date(job.createdAt);
-			const memos = data.memos.map((memo) => sanitizeMemo(memo, job.rawText, now));
+			const singleMemo = data.memos.length === 1;
+			const memos = data.memos.map((memo) => sanitizeMemo(memo, job.rawText, now, { singleMemo }));
 			onProgress?.({ stage: 'found', count: memos.length });
 			onProgress?.({ stage: 'saving', count: memos.length });
 			const result = await saveSourceWithMemos(

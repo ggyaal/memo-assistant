@@ -305,7 +305,8 @@ export function SettingsPage({ me, onBack, onProfileChanged }: { me: MeResponse;
 									</>
 								)}
 							</label>
-							{!dateOnlyOn && <p className="muted small">끄면 날짜만 있는 메모는 시각을 임의로 정하지 않고 알림을 걸지 않아요.</p>}
+							{!dateOnlyOn && <p className="muted small">끄면 날짜만 있는 한 번짜리 메모에는 알림을 걸지 않아요.</p>}
+							<p className="muted small">🔁 시각 없이 요일만 있는 반복 일정(예: 월·화·금 헬스장)은 회차 날 {dateOnlyOn ? '위 시각' : '오전 9시'}에 자동으로 알려 드려요. 다가오는 알림에서 하나씩 끌 수 있어요.</p>
 							<button type="submit" className="primary small">
 								기본값 저장
 							</button>

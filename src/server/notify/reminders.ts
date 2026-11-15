@@ -7,6 +7,8 @@ import { kstDate } from '../time.ts';
 import { sendDiscordDm } from './discord.ts';
 
 export const LEAD_OPTIONS = [0, 10, 30, 60] as const;
+/** Time of day for repeating memos without a time, unless the user chose one in settings (user decision 2026-11-15). */
+export const REPEATING_DEFAULT_TIME = '09:00';
 const MAX_ATTEMPTS = 3;
 /** Don't deliver a reminder this late (e.g. after an outage): stale news is noise. */
 const TOO_LATE_MS = 60 * 60 * 1000;
@@ -186,7 +188,7 @@ async function setRepeatingReminder(
 			return { ok: false, status: 422, code: 'invalid_request', message: '알림 시점을 골라 주세요(정시·10분·30분·1시간 전).' };
 		}
 	} else {
-		remindTime = params.time ?? defaults.dateOnlyTime;
+		remindTime = params.time ?? defaults.dateOnlyTime ?? REPEATING_DEFAULT_TIME;
 		if (!remindTime || !/^([01]\d|2[0-3]):[0-5]\d$/.test(remindTime)) {
 			return { ok: false, status: 422, code: 'invalid_request', message: '날짜만 있는 반복 일정이라 알림 받을 시각(HH:MM)을 골라 주세요.' };
 		}
@@ -516,7 +518,8 @@ export async function autoScheduleRecommended(
 	const { results } = await db
 		.prepare(
 			`SELECT m.id, m.due_at, m.due_date, m.recurrence FROM memos m
-			 WHERE m.workspace_id = ? AND m.deleted_at IS NULL AND m.completed_at IS NULL AND m.reminder_recommended = 1
+			 WHERE m.workspace_id = ? AND m.deleted_at IS NULL AND m.completed_at IS NULL
+			   AND (m.reminder_recommended = 1 OR (m.recurrence IS NOT NULL AND m.category IN ('todo', 'schedule')))
 			   AND (m.due_at IS NOT NULL OR m.due_date IS NOT NULL)
 			   AND NOT EXISTS (SELECT 1 FROM notifications n WHERE n.memo_id = m.id AND n.channel = 'discord')`,
 		)
@@ -529,10 +532,9 @@ export async function autoScheduleRecommended(
 	for (const memo of results) {
 		const rule = parseRecurrence(memo.recurrence);
 		if (rule) {
-			// Repeating: remind before every occurrence with the user's defaults (date-only needs a chosen time).
+			// Repeating: remind before every occurrence with the user's defaults; no time of day → 09:00 (or the user's own).
 			const lead = memo.due_at ? defaults.leadMinutes : null;
-			const remindTime = memo.due_at ? null : defaults.dateOnlyTime;
-			if (lead === null && remindTime === null) continue;
+			const remindTime = memo.due_at ? null : (defaults.dateOnlyTime ?? REPEATING_DEFAULT_TIME);
 			const slot = await nextReminderSlot(db, { id: memo.id, due_at: memo.due_at, rule }, { lead, remindTime }, kstDate(now), now);
 			if (!slot) continue;
 			inserts.push(

@@ -72,6 +72,8 @@ const EVERY_WEEK = /매주|매\s*주(?!말)|주마다|매\s*주말|매\s*평일/
 const BIWEEKLY = /격주|2주\s*마다|두\s*주\s*마다|이주\s*마다|2주에\s*한\s*번/;
 const MONTHLY = /매월|매달|매\s*월(?!요일)|매\s*달|달마다/;
 const EVERY_SUFFIX = /마다/;
+/** "From now on" wording: with weekdays it means a routine ("이제부터 월, 화, 금"). */
+const FROM_NOW_ON = /이제부터|앞으로|매번|꾸준히/;
 const THIS_WEEK = /이번\s*주|금주/;
 const NEXT_NEXT_WEEK = /다다음\s*주/;
 const NEXT_WEEK = /다음\s*주|담주/;
@@ -110,7 +112,10 @@ export function detectRecurrence(dueText: string | null | undefined, today: stri
 		if (!days.length) return { status: 'none' };
 		return { status: 'recurring', rule: { kind: 'weekly', days, interval: 2, start: nextOnOrAfter(today, days) } };
 	}
-	if (EVERY_WEEK.test(text) || (EVERY_SUFFIX.test(text) && days.length)) {
+	// Several named weekdays ("월 화 금", "월, 화, 금") are read as a weekly routine (user decision 2026-11-15).
+	const routine = named.length >= 2 || ((EVERY_SUFFIX.test(text) || FROM_NOW_ON.test(text)) && days.length > 0);
+	const weekQualifier = NEXT_NEXT_WEEK.test(text) || NEXT_WEEK.test(text) || THIS_WEEK.test(text);
+	if (EVERY_WEEK.test(text) || (routine && !weekQualifier)) {
 		if (!days.length) return { status: 'none' }; // "매주" alone: which day is not stated
 		return { status: 'recurring', rule: { kind: 'weekly', days, interval: 1, start: nextOnOrAfter(today, days) } };
 	}
@@ -124,7 +129,7 @@ export function detectRecurrence(dueText: string | null | undefined, today: stri
 		const dates = days.map((d) => addDays(monday, d)).filter((d) => d >= today);
 		return dates.length ? { status: 'once', rule: { kind: 'dates', dates } } : { status: 'none' };
 	}
-	// "월수금 운동", "평일 아침", "주말에 청소": every week, or just the coming ones? Ask.
+	// "평일 아침", "주말에 청소": every week, or just the coming ones? Ask.
 	const upcoming = sortDays(days)
 		.map((d) => nextOnOrAfter(today, [d]))
 		.sort();
@@ -249,8 +254,19 @@ export function clockTimeIn(text: string | null | undefined): string | null {
 
 const REPEAT_WORD = /매일|날마다|매주|격주|매월|매달|평일|주중|주말|마다/;
 
-/** Repeat wording the model left out of due_text but kept in the content (only if the input really says it). */
-export function repeatWordingFallback(content: string, rawText: string): string | null {
-	const m = REPEAT_WORD.exec(content);
-	return m && rawText.includes(m[0]) ? content : null;
+/**
+ * Repeat wording the model left out of due_text. Used only when the input really says it:
+ * - a repeat word or 2+ weekdays in the memo's own text that also appear in the input;
+ * - for an input that became a single memo, the input itself (nothing else it could belong to).
+ */
+export function repeatWordingFallback(memoText: string, rawText: string, singleMemo = false): string | null {
+	const word = REPEAT_WORD.exec(memoText);
+	if (word && rawText.includes(word[0])) return memoText;
+	const memoDays = weekdaysIn(memoText);
+	if (memoDays.length >= 2) {
+		const rawDays = weekdaysIn(rawText);
+		if (memoDays.every((d) => rawDays.includes(d))) return memoText;
+	}
+	if (singleMemo && (REPEAT_WORD.test(rawText) || weekdaysIn(rawText).length >= 2)) return rawText;
+	return null;
 }

@@ -80,7 +80,9 @@ const runAgent: RunMemoAgent = async (job: MemoJob) => {
 	await tool.run({
 		data: {
 			memos: [
-				job.rawText.includes('매주 월수금 오후 7시')
+				job.rawText.includes('이제부터 월, 화, 금')
+					? { title: '헬스장 방문 일정 설정', content: '헬스장에서 PT 받기', category: 'todo', due_text: null, due_at: null, reminder_recommended: true, reminder_reason: '매주 아침 운동 스케줄 확인 알림' }
+					: job.rawText.includes('매주 월수금 오후 7시')
 					? { title: '운동', content: job.rawText, category: 'schedule', due_text: '매주 월수금 오후 7시', due_at: '2026-11-16T19:00:00+09:00', reminder_recommended: false }
 					: job.rawText.includes('매일')
 						? { title: '물 마시기', content: job.rawText, category: 'todo', due_text: '매일', due_at: null, reminder_recommended: false }
@@ -643,12 +645,30 @@ describe('repeating reminders (one DM per occurrence, never twice)', () => {
 		expect((await list(send, jar))[0].reminder?.at).toBe('2026-11-18T09:30:00.000Z');
 	});
 
-	it('date-only repeating memo needs a time of day (never invented)', async () => {
-		const { send, jar, memo } = await repeating('alice', '매일 물 마시기');
+	it('a repeating memo without a time gets an automatic 09:00 reminder (user decision); a chosen time wins', async () => {
+		const { send, jar, memo } = await repeating('alice', '매일 물 마시기'); // not AI-recommended, no time
 		expect(memo.title).toBe('물 마시기');
-		expect((await remind(send, jar, memo.id, {})).status).toBe(422);
-		// 12:00 KST now → today 08:00 has passed → tomorrow 08:00 KST.
+		// Saved while Discord is on → scheduled at once: today 09:00 has passed (12:00 now) → tomorrow 09:00 KST.
+		expect(memo.reminder).toMatchObject({ at: '2026-11-16T00:00:00.000Z', status: 'scheduled' });
+		expect(await (await remind(send, jar, memo.id, {})).json()).toEqual({ scheduledAt: '2026-11-16T00:00:00.000Z' });
 		expect(await (await remind(send, jar, memo.id, { time: '08:00' })).json()).toEqual({ scheduledAt: '2026-11-15T23:00:00.000Z' });
+		// The user's own default time is used instead of 09:00.
+		await send('/api/settings/reminders', { method: 'PATCH', jar, headers: json, body: JSON.stringify({ leadMinutes: 30, dateOnlyTime: '07:30' }) });
+		expect(await (await remind(send, jar, memo.id, {})).json()).toEqual({ scheduledAt: '2026-11-15T22:30:00.000Z' });
+	});
+
+	it('the reported case: "이제부터 월, 화, 금, 헬스장 가야해 PT 받아야 돼" → weekly Mon/Tue/Fri with automatic reminders', async () => {
+		const { send, jar, memo } = await repeating('alice', '이제부터 월, 화, 금, 헬스장 가야해 PT 받아야 돼');
+		const full = ((await (await send('/api/memos?scope=all', { jar })).json()) as { memos: { recurrence: unknown; occurrence: { date: string } }[] }).memos[0];
+		expect(full.recurrence).toMatchObject({ kind: 'weekly', days: [0, 1, 4], interval: 1 });
+		expect(memo.reminder).toMatchObject({ at: '2026-11-16T00:00:00.000Z', status: 'scheduled' }); // Mon 09:00 KST
+		clock = new Date('2026-11-16T00:00:05Z');
+		expect((await run()).sent).toBe(1);
+		expect((await list(send, jar))[0].reminder?.at).toBe('2026-11-17T00:00:00.000Z'); // Tue 09:00
+		clock = new Date('2026-11-17T00:00:05Z');
+		expect((await run()).sent).toBe(1);
+		expect((await list(send, jar))[0].reminder?.at).toBe('2026-11-20T00:00:00.000Z'); // Fri 09:00
+		expect(sentDms).toHaveLength(2);
 	});
 
 	it('a failed send frees the occurrence for the retry; a permanent refusal stops the series', async () => {

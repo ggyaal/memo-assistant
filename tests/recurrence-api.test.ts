@@ -82,11 +82,14 @@ describe('saving: the server turns the wording into a rule (no AI math)', () => 
 		expect(memo.due_date).toBe('2026-11-23');
 	});
 
-	it('"월수금 운동" is unclear: stored as a question, first day kept', async () => {
-		const memo = await makeApp(runner({ due_text: '월수금' })).create('월수금 운동');
+	it('"월수금 운동" is a weekly routine (no question); "평일 아침" is asked', async () => {
+		const weekly = await makeApp(runner({ due_text: '월수금' })).create('월수금 운동');
+		expect(weekly.recurrence).toMatchObject({ kind: 'weekly', days: [0, 2, 4], interval: 1 });
+		expect(weekly.recurrence_question).toBeNull();
+		const memo = await makeApp(runner({ due_text: '평일 아침' })).create('평일 아침 운동');
 		expect(memo.recurrence).toBeNull();
-		expect(memo.recurrence_question?.repeat).toMatchObject({ kind: 'weekly', days: [0, 2, 4] });
-		expect(memo.recurrence_question?.once).toEqual({ kind: 'dates', dates: ['2026-11-18', '2026-11-20', '2026-11-23'] });
+		expect(memo.recurrence_question?.repeat).toMatchObject({ kind: 'weekly', days: [0, 1, 2, 3, 4] });
+		expect(memo.recurrence_question?.once).toEqual({ kind: 'dates', dates: ['2026-11-18', '2026-11-19', '2026-11-20', '2026-11-23', '2026-11-24'] });
 		expect(memo.due_date).toBe('2026-11-18');
 	});
 
@@ -142,16 +145,16 @@ describe('list, calendar and agenda show occurrences from the same row', () => {
 
 describe('asking when the wording is unclear', () => {
 	it('"매주 반복" turns it into a weekly rule; "이번만" keeps just those days; asked once', async () => {
-		const app = makeApp(runner({ due_text: '월수금' }));
-		const a = await app.create('월수금 운동');
+		const app = makeApp(runner({ due_text: '평일 아침' }));
+		const a = await app.create('평일 아침 운동');
 		const repeat = (await (await app.choose(a.id, 'repeat')).json()) as { memo: Memo };
-		expect(repeat.memo.recurrence).toMatchObject({ kind: 'weekly', days: [0, 2, 4], interval: 1 });
+		expect(repeat.memo.recurrence).toMatchObject({ kind: 'weekly', days: [0, 1, 2, 3, 4], interval: 1 });
 		expect(repeat.memo.recurrence_question).toBeNull();
 		expect((await app.choose(a.id, 'once')).status).toBe(409);
 
-		const b = await app.create('월수금 운동');
+		const b = await app.create('평일 아침 운동');
 		const once = (await (await app.choose(b.id, 'once')).json()) as { memo: Memo };
-		expect(once.memo.recurrence).toEqual({ kind: 'dates', dates: ['2026-11-18', '2026-11-20', '2026-11-23'] });
+		expect(once.memo.recurrence).toEqual({ kind: 'dates', dates: ['2026-11-18', '2026-11-19', '2026-11-20', '2026-11-23', '2026-11-24'] });
 		expect((await app.choose(b.id, 'maybe')).status).toBe(400);
 	});
 });

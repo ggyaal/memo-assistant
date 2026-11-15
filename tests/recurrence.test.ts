@@ -40,6 +40,11 @@ describe('detectRecurrence', () => {
 		['주말마다', { kind: 'weekly', days: [5, 6], interval: 1, start: '2026-11-21' }],
 		['매 주말', { kind: 'weekly', days: [5, 6], interval: 1, start: '2026-11-21' }],
 		['매월 15일', { kind: 'monthly', day: 15, start: WED }],
+		// Several named weekdays = a weekly routine (user decision), with or without "이제부터".
+		['월수금 운동', { kind: 'weekly', days: [0, 2, 4], interval: 1, start: WED }],
+		['월요일과 목요일', { kind: 'weekly', days: [0, 3], interval: 1, start: '2026-11-19' }],
+		['이제부터 월, 화, 금', { kind: 'weekly', days: [0, 1, 4], interval: 1, start: '2026-11-20' }],
+		['앞으로 화요일', { kind: 'weekly', days: [1], interval: 1, start: '2026-11-24' }],
 		['매달 1일 오전 10시', { kind: 'monthly', day: 1, start: WED }],
 	])('repeating: %s', (text, rule) => {
 		expect(rec(text)).toEqual({ status: 'recurring', rule });
@@ -54,10 +59,8 @@ describe('detectRecurrence', () => {
 	});
 
 	it.each([
-		['월수금 운동', [0, 2, 4], ['2026-11-18', '2026-11-20', '2026-11-23']],
 		['평일 아침 7시', [0, 1, 2, 3, 4], ['2026-11-18', '2026-11-19', '2026-11-20', '2026-11-23', '2026-11-24']],
 		['주말에 청소', [5, 6], ['2026-11-21', '2026-11-22']],
-		['월요일과 목요일', [0, 3], ['2026-11-19', '2026-11-23']],
 	])('unclear "%s" asks: every week or once', (text, days, dates) => {
 		const r = rec(text);
 		expect(r.status).toBe('ambiguous');
@@ -160,6 +163,18 @@ describe('sanitizeMemo with repeat wording (server only)', () => {
 		const m = sanitizeMemo({ ...base, title: '평일 아침 영어 공부', content: '평일 아침 영어 공부', due_text: null }, '평일 아침에 영어 공부도 하고 싶어', now);
 		expect(m.recurrence).toBeNull();
 		expect(m.recurrence_question?.repeat).toMatchObject({ kind: 'weekly', days: [0, 1, 2, 3, 4] });
+	});
+
+	it('the real case: model left the wording out of a single-memo input → read from the input', () => {
+		const raw = '이제부터 월, 화, 금, 헬스장 가야해 PT 받아야 돼';
+		const memo = { ...base, title: '헬스장 방문 일정 설정', content: '헬스장에서 PT 받기', due_text: null };
+		const single = sanitizeMemo(memo, raw, now, { singleMemo: true });
+		expect(single.recurrence).toEqual({ kind: 'weekly', days: [0, 1, 4], interval: 1, start: '2026-11-16' });
+		expect([single.due_date, single.due_at]).toEqual(['2026-11-16', null]);
+		// With several memos from one input, the input's weekdays could belong to another memo: not used.
+		expect(sanitizeMemo(memo, raw, now).recurrence).toBeNull();
+		// But weekdays in the memo's own text that the input also has are used.
+		expect(sanitizeMemo({ ...memo, content: '월, 화, 금 헬스장 PT' }, raw, now).recurrence).toMatchObject({ kind: 'weekly', days: [0, 1, 4] });
 	});
 
 	it('a repeat word the input never said is ignored', () => {

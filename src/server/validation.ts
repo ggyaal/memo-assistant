@@ -152,7 +152,7 @@ function squash(value: string): string {
  * - a due date is kept only when the text names a day (see resolveDueDate),
  * - no reminder means no reminder reason; no priority means no priority reason.
  */
-export function sanitizeMemo(memo: ModelMemo, rawText: string, now: Date): SanitizedMemo {
+export function sanitizeMemo(memo: ModelMemo, rawText: string, now: Date, options: { singleMemo?: boolean } = {}): SanitizedMemo {
 	let dueText = memo.due_text ? clip(memo.due_text, LIMITS.dueTextMax) : null;
 	if (dueText && !squash(rawText).includes(squash(dueText))) dueText = null;
 	if (dueText === '') dueText = null;
@@ -166,7 +166,7 @@ export function sanitizeMemo(memo: ModelMemo, rawText: string, now: Date): Sanit
 	// Several days or a repeat ("매주 월수금", "이번 주 월, 목", "평일"): computed here from the
 	// wording, not by the model. due_at/due_date become the first occurrence.
 	// The time: the model's (when it gave one), else a clearly stated time in the wording.
-	const repeatText = dueText ?? repeatWordingFallback(`${memo.title} ${memo.content}`, rawText);
+	const repeatText = dueText ?? repeatWordingFallback(`${memo.title} ${memo.content}`, rawText, options.singleMemo);
 	const statedTime = dueAt ? kstTimeOf(dueAt) : repeatText && hasExplicitTime(repeatText) ? clockTimeIn(repeatText) : null;
 	const schedule = scheduleFromText(repeatText, statedTime, now);
 	if (schedule) {
