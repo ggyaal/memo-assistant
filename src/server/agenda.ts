@@ -8,7 +8,9 @@ const UNSET_RANK = 1;
  * When a memo is due, as epoch ms. A date-only deadline counts from the start
  * of that KST day, so "오늘 장 보기" sorts before anything timed later today.
  */
-export function dueInstant(memo: Pick<Memo, 'due_at' | 'due_date'>): number {
+export function dueInstant(memo: Pick<Memo, 'due_at' | 'due_date' | 'occurrence'>): number {
+	// A repeating memo is placed by the occurrence it currently stands for.
+	if (memo.occurrence) return memo.occurrence.at ? Date.parse(memo.occurrence.at) : Date.parse(`${memo.occurrence.date}T00:00:00+09:00`);
 	if (memo.due_at) return Date.parse(memo.due_at);
 	if (memo.due_date) return Date.parse(`${memo.due_date}T00:00:00+09:00`);
 	return Number.POSITIVE_INFINITY;

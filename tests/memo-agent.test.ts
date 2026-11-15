@@ -112,6 +112,8 @@ describe('MemoOrganizer agent (faux model, real Flue runtime + local D1)', () =>
 		expect(prompt).toContain('due_date');
 		// Category rule: a date alone does not make something a schedule.
 		expect(prompt).toContain('날짜·시각이 있다고 모두 schedule이 아닙니다');
+		// Repeat wording is copied verbatim; the server does the calendar math.
+		expect(prompt).toContain('반복·여러 날짜의 날짜 계산은 서버가 하므로');
 		expect(prompt).not.toContain(json.source.id);
 	});
 

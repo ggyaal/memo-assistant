@@ -45,7 +45,12 @@ function monthCells(month: string): (string | null)[] {
 
 /** "11월 16일 (월)" for a KST day string (treated as a plain date). */
 const dayTitle = (day: string) => dayTitleFmt.format(new Date(`${day}T00:00:00Z`));
-const timeOf = (memo: Memo) => (memo.due_at ? timeFmt.format(new Date(memo.due_at)) : '시간 미정');
+/** Where a memo sits on the calendar: an occurrence's day for repeating memos, else the due day. */
+const dayOfMemo = (m: Memo) => m.occurrence?.date ?? m.due_date;
+const atOf = (m: Memo) => (m.occurrence ? m.occurrence.at : m.due_at);
+const isDone = (m: Memo) => !!(m.occurrence ? m.occurrence.completed_at : m.completed_at);
+const timeOf = (memo: Memo) => (atOf(memo) ? timeFmt.format(new Date(atOf(memo)!)) : '시간 미정');
+const markOf = (m: Memo) => (m.recurrence ? '🔁' : m.recurrence_question ? '❓' : '');
 
 /**
  * Month calendar of the same memo rows as the list, placed by their KST
@@ -87,7 +92,10 @@ export function CalendarView({ refreshKey, onChanged }: { refreshKey: number; on
 	const visible = useMemo(() => (memos ?? []).filter((m) => filter.includes(m.category)), [memos, filter]);
 	const byDay = useMemo(() => {
 		const map = new Map<string, Memo[]>();
-		for (const m of visible) if (m.due_date) map.set(m.due_date, [...(map.get(m.due_date) ?? []), m]);
+		for (const m of visible) {
+			const day = dayOfMemo(m);
+			if (day) map.set(day, [...(map.get(day) ?? []), m]);
+		}
 		return map;
 	}, [visible]);
 	const hiddenCount = (memos?.length ?? 0) - visible.length;
@@ -141,8 +149,8 @@ export function CalendarView({ refreshKey, onChanged }: { refreshKey: number; on
 					) : (
 						<ul>
 							{todayItems.map((m) => (
-								<li key={m.id} className={m.completed_at ? 'is-done' : undefined}>
-									<span className="calendar__time">{timeOf(m)}</span> {ICON[m.category]} {m.title}
+								<li key={`${m.id}:${dayOfMemo(m)}`} className={isDone(m) ? 'is-done' : undefined}>
+									<span className="calendar__time">{timeOf(m)}</span> {ICON[m.category]} {markOf(m)} {m.title}
 								</li>
 							))}
 						</ul>
@@ -180,8 +188,9 @@ export function CalendarView({ refreshKey, onChanged }: { refreshKey: number; on
 							{items.length > 0 && <span className="calendar__count">{items.length}</span>}
 							<span className="calendar__items" aria-hidden="true">
 								{items.slice(0, 3).map((m) => (
-									<span key={m.id} className={`calendar__item calendar__item--${m.category}${m.completed_at ? ' is-done' : ''}`}>
-										{ICON[m.category]} {m.due_at ? `${timeFmt.format(new Date(m.due_at))} ` : ''}
+									<span key={`${m.id}:${dayOfMemo(m)}`} className={`calendar__item calendar__item--${m.category}${isDone(m) ? ' is-done' : ''}`}>
+										{ICON[m.category]}
+										{markOf(m)} {atOf(m) ? `${timeFmt.format(new Date(atOf(m)!))} ` : ''}
 										{m.title}
 									</span>
 								))}
@@ -206,7 +215,11 @@ export function CalendarView({ refreshKey, onChanged }: { refreshKey: number; on
 					) : (
 						<div className="cards">
 							{selectedItems.map((m) => (
-								<MemoCard key={`${m.id}:${m.due_date}:${m.due_at ?? ''}:${m.completed_at ?? ''}:${m.reminder?.at ?? ''}`} memo={m} onChanged={changed} />
+								<MemoCard
+									key={`${m.id}:${dayOfMemo(m)}:${atOf(m) ?? ''}:${isDone(m)}:${m.reminder?.at ?? ''}:${JSON.stringify(m.recurrence)}`}
+									memo={m}
+									onChanged={changed}
+								/>
 							))}
 						</div>
 					)}

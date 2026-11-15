@@ -9,6 +9,7 @@ import type {
 	ApiErrorCode,
 	CreateMemosResponse,
 	ListMemosResponse,
+	Memo,
 	MemoProgressEvent,
 	MemoStreamError,
 	SettingsResponse,
@@ -24,6 +25,9 @@ import {
 	getMemo,
 	listCalendar,
 	listIdeas,
+	listRepeating,
+	setOccurrenceDone,
+	setRecurrence,
 	listOverdue,
 	updateMemo,
 	listUpcoming,
@@ -45,6 +49,7 @@ import { linkedProviders } from './auth/store.ts';
 import {
 	autoScheduleRecommended,
 	followDeadline,
+	syncReminderAfterEdit,
 	cancelReminder,
 	getReminderDefaults,
 	setReminder,
@@ -53,6 +58,8 @@ import {
 import { type Channel, CHANNELS, channelStatuses, getReminderTone, sendTonePreview, setChannel, setDisplayName, setReminderTone, type SettingsEnv } from './settings.ts';
 import { type AuthVariables, registerAuthRoutes, resolveAuth } from './auth/routes.ts';
 import { kstDate, kstDayRangeUtc } from './time.ts';
+import { expand, isOccurrence, loadDone, occurrenceAt, withUpcoming } from './occurrences.ts';
+import { nextOccurrence, type Recurrence, type Weekday } from '../shared/recurrence.ts';
 import {
 	AUDIO_MAX_BYTES,
 	AUDIO_MAX_SECONDS,
@@ -65,6 +72,9 @@ import {
 import {
 	CompleteRequestSchema,
 	EditMemoSchema,
+	OccurrenceDateSchema,
+	OccurrenceDoneSchema,
+	RecurrenceChoiceSchema,
 	CancelMemosRequestSchema,
 	CreateMemosRequestSchema,
 	issuesToMessage,
@@ -257,12 +267,15 @@ export function createApi(deps: ApiDeps) {
 		try {
 			const current = now();
 			const today = kstDate(current);
-			const [upcoming, overdue, ideas] = await Promise.all([
+			const [upcoming, overdue, ideas, repeating] = await Promise.all([
 				listUpcoming(c.env.DB, c.get('auth').workspace.id, current, today),
 				listOverdue(c.env.DB, c.get('auth').workspace.id, current, today),
 				listIdeas(c.env.DB, c.get('auth').workspace.id, LIMITS.agendaMax),
+				listRepeating(c.env.DB, c.get('auth').workspace.id),
 			]);
-			return c.json<AgendaResponse>({ ...buildAgenda(upcoming, LIMITS.agendaMax, overdue), ideas });
+			// Each repeating memo joins the upcoming lists once, as its next not-done occurrence.
+			const next = (await withUpcoming(c.env.DB, repeating.filter((m) => !m.completed_at), current)).filter((m) => m.occurrence);
+			return c.json<AgendaResponse>({ ...buildAgenda([...upcoming, ...next], LIMITS.agendaMax, overdue), ideas: await withUpcoming(c.env.DB, ideas, current) });
 		} catch (error) {
 			console.error('agenda failed', describeError(error));
 			return fail(c, 500, 'db_error', '다가오는 일정을 불러오지 못했습니다.');
@@ -278,7 +291,19 @@ export function createApi(deps: ApiDeps) {
 		const from = `${month}-01`;
 		const to = `${month}-${String(last).padStart(2, '0')}`;
 		try {
-			const memos = await listCalendar(c.env.DB, c.get('auth').workspace.id, from, to);
+			const workspaceId = c.get('auth').workspace.id;
+			const [single, repeating] = await Promise.all([listCalendar(c.env.DB, workspaceId, from, to), listRepeating(c.env.DB, workspaceId)]);
+			// Repeating memos: one entry per occurrence in this month (a stopped series ends on the day it was stopped).
+			const done = await loadDone(c.env.DB, repeating.map((m) => m.id), from, to);
+			const occurrences = repeating.flatMap((m) => {
+				const end = m.completed_at && kstDate(new Date(m.completed_at)) < to ? kstDate(new Date(m.completed_at)) : to;
+				return expand(m, from, end, done.get(m.id));
+			});
+			const dayOf = (m: Memo) => m.occurrence?.date ?? m.due_date ?? '';
+			const timeOf = (m: Memo) => (m.occurrence ? m.occurrence.at : m.due_at);
+			const memos = [...single, ...occurrences].sort(
+				(a, b) => dayOf(a).localeCompare(dayOf(b)) || (timeOf(a) ? 1 : 0) - (timeOf(b) ? 1 : 0) || (timeOf(a) ?? '').localeCompare(timeOf(b) ?? ''),
+			);
 			return c.json<CalendarResponse>({ month, from, to, memos });
 		} catch (error) {
 			console.error('calendar failed', describeError(error));
@@ -507,7 +532,7 @@ export function createApi(deps: ApiDeps) {
 			if (limited) return limited;
 			const memo = await setCompleted(c.env.DB, c.get('auth').workspace.id, id.output, parsed.output.completed, current);
 			if (!memo) return fail(c, 404, 'not_found', '메모를 찾지 못했습니다.');
-			return c.json({ memo });
+			return c.json({ memo: (await withUpcoming(c.env.DB, [memo], current))[0] });
 		} catch (error) {
 			console.error('complete failed', describeError(error));
 			return fail(c, 500, 'db_error', '완료 상태를 저장하지 못했습니다.');
@@ -546,14 +571,71 @@ export function createApi(deps: ApiDeps) {
 				due_date: input.dueDate,
 			});
 			if (!result) return fail(c, 404, 'not_found', '메모를 찾지 못했습니다.');
-			if (!result.dueChanged) return c.json({ memo: result.memo });
-			await followDeadline(c.env.DB, id.output, workspace.id, dueAt, current);
-			// Re-read so the reminder shown on the card matches what was rescheduled.
-			return c.json({ memo: (await getMemo(c.env.DB, workspace.id, id.output)) ?? result.memo });
+			let repeatChanged = false;
+			if (input.repeat !== undefined) {
+				// A repeat chosen in the form starts on the edited date; the first occurrence becomes due_at/due_date.
+				const rule = input.repeat && input.dueDate ? ruleFromForm(input.repeat, input.dueDate) : null;
+				const first = rule ? nextOccurrence(rule, input.dueDate!) : null;
+				const startRule = rule && first && rule.kind !== 'dates' ? { ...rule, start: first } : rule;
+				await setRecurrence(
+					c.env.DB,
+					workspace.id,
+					id.output,
+					startRule,
+					first ? { due_date: first, due_at: input.dueTime ? new Date(`${first}T${input.dueTime}:00+09:00`).toISOString() : null } : null,
+				);
+				repeatChanged = JSON.stringify(startRule) !== JSON.stringify(result.memo.recurrence);
+			}
+			if (result.dueChanged || repeatChanged) await syncReminderAfterEdit(c.env.DB, id.output, workspace.id, current);
+			// Re-read so the card shows the stored rule, the next occurrence and the rescheduled reminder.
+			const fresh = (await getMemo(c.env.DB, workspace.id, id.output)) ?? result.memo;
+			return c.json({ memo: (await withUpcoming(c.env.DB, [fresh], current))[0] });
 		} catch (error) {
 			console.error('edit failed', describeError(error));
 			return fail(c, 500, 'db_error', '메모를 저장하지 못했습니다.');
 		}
+	});
+
+	// Check or uncheck ONE occurrence of a repeating memo (the series and other days are untouched).
+	api.patch('/memos/:id/occurrences/:date', async (c) => {
+		const blocked = crossSiteBlock(c, true);
+		if (blocked) return blocked;
+		const id = v.safeParse(MemoIdSchema, c.req.param('id'));
+		const day = v.safeParse(OccurrenceDateSchema, c.req.param('date'));
+		if (!id.success || !day.success) return fail(c, 400, 'invalid_request', '메모 또는 날짜 형식이 올바르지 않습니다.');
+		const parsed = v.safeParse(OccurrenceDoneSchema, (await readJson(c)) ?? null);
+		if (!parsed.success) return fail(c, 400, 'invalid_request', issuesToMessage(parsed.issues));
+		const memo = await getMemo(c.env.DB, c.get('auth').workspace.id, id.output);
+		if (!memo) return fail(c, 404, 'not_found', '메모를 찾지 못했습니다.');
+		if (!memo.recurrence || !isOccurrence(memo.recurrence, day.output)) return fail(c, 404, 'not_found', '이 날짜는 반복 일정의 회차가 아니에요.');
+		const current = now();
+		const limited = await mutationLimit(c, current);
+		if (limited) return limited;
+		const completedAt = await setOccurrenceDone(c.env.DB, memo.id, day.output, parsed.output.completed, current);
+		return c.json({ occurrence: { date: day.output, at: occurrenceAt(memo, day.output), completed_at: completedAt } });
+	});
+
+	// Answer the "매주 반복인가요?" question for unclear wording ("월수금", "평일", "주말").
+	api.post('/memos/:id/recurrence', async (c) => {
+		const blocked = crossSiteBlock(c, true);
+		if (blocked) return blocked;
+		const id = v.safeParse(MemoIdSchema, c.req.param('id'));
+		if (!id.success) return fail(c, 400, 'invalid_request', issuesToMessage(id.issues));
+		const parsed = v.safeParse(RecurrenceChoiceSchema, (await readJson(c)) ?? null);
+		if (!parsed.success) return fail(c, 400, 'invalid_request', issuesToMessage(parsed.issues));
+		const { workspace } = c.get('auth');
+		const memo = await getMemo(c.env.DB, workspace.id, id.output);
+		if (!memo) return fail(c, 404, 'not_found', '메모를 찾지 못했습니다.');
+		if (!memo.recurrence_question) return fail(c, 409, 'conflict', '이미 정해진 메모예요.');
+		const current = now();
+		const limited = await mutationLimit(c, current);
+		if (limited) return limited;
+		const rule = parsed.output.choice === 'repeat' ? memo.recurrence_question.repeat : memo.recurrence_question.once;
+		const first = nextOccurrence(rule, kstDate(current)) ?? (rule.kind === 'dates' ? rule.dates[0] : rule.start);
+		await setRecurrence(c.env.DB, workspace.id, memo.id, rule, { due_date: first, due_at: occurrenceAt(memo, first) });
+		await syncReminderAfterEdit(c.env.DB, memo.id, workspace.id, current);
+		const fresh = (await getMemo(c.env.DB, workspace.id, memo.id)) ?? memo;
+		return c.json({ memo: (await withUpcoming(c.env.DB, [fresh], current))[0] });
 	});
 
 	// Remove an item from "지나버린 일". Soft delete, overdue + not-done only.
@@ -592,7 +674,8 @@ export function createApi(deps: ApiDeps) {
 				cursor: q.cursor,
 				limit: q.limit,
 			});
-			return c.json<ListMemosResponse>(result);
+			// Repeating memos show their next occurrence (computed, no AI).
+			return c.json<ListMemosResponse>({ ...result, memos: await withUpcoming(c.env.DB, result.memos, now()) });
 		} catch (error) {
 			console.error('list memos failed', describeError(error));
 			return fail(c, 500, 'db_error', '메모 목록을 불러오지 못했습니다.');
@@ -798,4 +881,11 @@ export function createApi(deps: ApiDeps) {
 	}
 
 	return api;
+}
+
+/** The repeat chosen in the edit form, starting on `start` (KST day). */
+function ruleFromForm(repeat: NonNullable<v.InferOutput<typeof EditMemoSchema>['repeat']>, start: string): Recurrence {
+	if (repeat.kind === 'daily') return { kind: 'daily', start };
+	if (repeat.kind === 'monthly') return { kind: 'monthly', day: Number(start.slice(8)), start };
+	return { kind: 'weekly', days: [...new Set(repeat.days)].sort((a, b) => a - b) as Weekday[], interval: repeat.interval, start };
 }

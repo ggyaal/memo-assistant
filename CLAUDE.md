@@ -65,6 +65,7 @@ AX School **Build Your Agent** 과제용으로, 여러 사람이 공개 체험�
 - 알림은 사용자가 메모마다 확인한 예약만 보낸다(날짜만 있으면 시각을 사용자가 고름). 발송은 `runDueReminders`(Cron)만 하며, 행 단위 조건부 claim과 발송 직전 재확인을 빼지 않는다. 게스트에게는 개인 알림을 보내지 않는다. 채널은 실제 테스트 메시지가 도착한 뒤에만 켠다.
 - 순서·완료·삭제는 **공용 공간에서는 모든 방문자에게 공유되는 편집**이다(소유 확인 없음, 2026-11-14 사용자 결정). 삭제는 기한 지난 미완료 메모만 숨김(`deleted_at`) 처리하고, 실제 DELETE SQL은 쓰지 않는다. 메모를 읽는 모든 쿼리에 `deleted_at IS NULL`을 넣는다.
 - Discord 알림 문장·카드(`src/shared/discord-card.ts`)와 캘린더(`GET /api/calendar`)는 **저장된 값과 고정 템플릿만** 쓴다. 발송·말투·캘린더 경로에서 Workers AI를 호출하지 않는다(`tests/auth.test.ts`의 AI 트랩 테스트 유지). 날짜만 있는 메모에 시각을 만들지 않고, 캘린더는 `created_at`이 아니라 KST `due_date`로 배치한다. 카드 실패(400) 시 텍스트 대체는 한 번만 보내고 둘 다 보내지 않는다. User Install은 쓰지 않는다(사용자 결정).
+- 반복·여러 날짜(`src/shared/recurrence.ts`)는 **저장된 문구로 서버가 계산**한다. 모델은 반복 표현을 `due_text`에 그대로 옮기기만 하고, 회차 계산·알림·캘린더에서 AI를 부르지 않는다. `due_at`/`due_date`는 첫 회차로 두어 기존 코드와 호환하고, 기존 기한 조회(다가오는 일·지나버린 일·캘린더 단건)는 `recurrence IS NULL`만 다룬다. 반복인지 불분명하면 규칙을 정하지 말고 `recurrence_question`으로 사용자에게 묻는다. 회차 알림은 `reminder_deliveries`(memo+channel+회차 기본 키)를 먼저 넣은 뒤에만 보내고, 일시 오류일 때만 그 행을 지운다. 시각이 애매한 "7시"는 시각으로 만들지 않는다.
 - 에이전트 이름을 바꾸면 Durable Object 클래스명이 바뀐다. `wrangler.jsonc` migrations에 새 태그를 추가하고(`renamed_classes` 등) 기존 항목은 수정하지 않는다. `wrangler.jsonc`를 수정했다면 `npm run cf-typegen`을 다시 실행한다.
 
 ### 실행·검증 명령

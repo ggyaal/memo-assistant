@@ -80,10 +80,14 @@ const runAgent: RunMemoAgent = async (job: MemoJob) => {
 	await tool.run({
 		data: {
 			memos: [
-				job.rawText.includes('오후 3시')
+				job.rawText.includes('매주 월수금 오후 7시')
+					? { title: '운동', content: job.rawText, category: 'schedule', due_text: '매주 월수금 오후 7시', due_at: '2026-11-16T19:00:00+09:00', reminder_recommended: false }
+					: job.rawText.includes('매일')
+						? { title: '물 마시기', content: job.rawText, category: 'todo', due_text: '매일', due_at: null, reminder_recommended: false }
+						: job.rawText.includes('오후 3시')
 					? // exact time, reminder recommended
 						{ title: job.rawText.slice(0, 20), content: job.rawText, category: 'schedule', due_text: '내일 오후 3시', due_at: '2026-11-16T15:00:00+09:00', reminder_recommended: true }
-					: { title: job.rawText.slice(0, 20), content: job.rawText, category: 'todo', due_text: '내일', due_at: null, reminder_recommended: job.rawText.includes('[추천]') },
+						: { title: job.rawText.slice(0, 20), content: job.rawText, category: 'todo', due_text: '내일', due_at: null, reminder_recommended: job.rawText.includes('[추천]') },
 			],
 		},
 		toolCallId: 't',
@@ -564,6 +568,117 @@ describe('Discord channel: must join the bot\'s server first', () => {
 		expect(status.available).toBe(true);
 		expect(status.server).toBeUndefined();
 		expect(memberChecks).toEqual([]);
+	});
+});
+
+describe('repeating reminders (one DM per occurrence, never twice)', () => {
+	const json = { 'content-type': 'application/json' };
+	type Item = { id: string; title: string; reminder: { at: string; status: string } | null; occurrence?: { date: string } };
+	const list = async (send: Send, jar: Jar) => ((await (await send('/api/memos?scope=all', { jar })).json()) as { memos: Item[] }).memos;
+	const remind = (send: Send, jar: Jar, id: string, body: object) => send(`/api/memos/${id}/reminder`, { method: 'PUT', jar, headers: json, body: JSON.stringify(body) });
+	const run = () => runDueReminders({ DB: db, DISCORD_BOT_TOKEN: 'bot-token' }, clock, fakeFetch);
+	const deliveries = async () => ((await db.prepare('SELECT COUNT(*) AS n FROM reminder_deliveries').first<{ n: number }>())?.n ?? 0);
+	type Embed = { fields: { name: string; value: string }[] };
+
+	async function repeating(subject = 'alice', text = '매주 월수금 오후 7시 운동') {
+		const send = makeApp();
+		const jar = (await login(send, 'discord', subject)).jar;
+		const on = await send('/api/settings/notifications/discord', { method: 'PUT', jar, headers: json, body: JSON.stringify({ enabled: true }) });
+		if (on.status !== 200) {
+			await db.prepare("INSERT INTO notification_preferences (user_id, channel, enabled, verified_at, updated_at) SELECT id, 'discord', 1, '2026-11-15T00:00:00.000Z', '2026-11-15T00:00:00.000Z' FROM users WHERE id NOT IN (SELECT user_id FROM notification_preferences)").run();
+		}
+		await postMemo(send, text, jar);
+		const memo = (await list(send, jar))[0];
+		sentDms.length = 0;
+		return { send, jar, memo };
+	}
+
+	it('"30분 전" for every occurrence: sends the card for this one, then waits for the next', async () => {
+		const { send, jar, memo } = await repeating(); // Mon/Wed/Fri 19:00 KST, first 2026-11-16
+		expect(await (await remind(send, jar, memo.id, { leadMinutes: 30 })).json()).toEqual({ scheduledAt: '2026-11-16T09:30:00.000Z' });
+		expect((await remind(send, jar, memo.id, { at: '2026-11-16T18:00:00+09:00' })).status).toBe(422); // one picked time does not fit a series
+		clock = new Date('2026-11-16T09:30:05Z');
+		expect((await run()).sent).toBe(1);
+		const embed = (sentDms[0].body.embeds as Embed[])[0];
+		expect(embed.fields).toContainEqual({ name: '🔁 반복', value: '매주 월·수·금', inline: false });
+		expect(embed.fields).toContainEqual({ name: '⏰ 예정', value: '11월 16일 (월) 오후 7:00', inline: false });
+		expect(embed.fields).toContainEqual({ name: '🔔 알림', value: '30분 전', inline: true });
+		expect((await list(send, jar))[0].reminder).toMatchObject({ at: '2026-11-18T09:30:00.000Z', status: 'scheduled' }); // Wednesday
+		expect(await run()).toMatchObject({ sent: 0 });
+		clock = new Date('2026-11-18T09:30:05Z');
+		expect((await run()).sent).toBe(1);
+		expect(sentDms).toHaveLength(2);
+	});
+
+	it('the same occurrence is never sent twice, even if the row is pushed back to it', async () => {
+		const { send, jar, memo } = await repeating();
+		await remind(send, jar, memo.id, { leadMinutes: 30 });
+		clock = new Date('2026-11-16T09:30:05Z');
+		await run();
+		// Simulate a stale state (e.g. an edit racing a send) pointing at the delivered occurrence again.
+		await db.prepare("UPDATE notifications SET occurrence_date = '2026-11-16', scheduled_at = '2026-11-16T09:30:00.000Z', next_attempt_at = '2026-11-16T09:30:00.000Z', status = 'scheduled'").run();
+		const again = await run();
+		expect(again.sent).toBe(0);
+		expect(sentDms).toHaveLength(1);
+		expect(await deliveries()).toBe(1);
+		expect((await list(send, jar))[0].reminder?.at).toBe('2026-11-18T09:30:00.000Z');
+	});
+
+	it('two overlapping cron runs send one DM for the occurrence', async () => {
+		const { send, jar, memo } = await repeating();
+		await remind(send, jar, memo.id, { leadMinutes: 0 });
+		clock = new Date('2026-11-16T10:00:05Z');
+		const [a, b] = await Promise.all([run(), run()]);
+		expect(a.sent + b.sent).toBe(1);
+		expect(sentDms).toHaveLength(1);
+	});
+
+	it('an occurrence checked off before its time is skipped (no DM) and the next one is waited for', async () => {
+		const { send, jar, memo } = await repeating();
+		await remind(send, jar, memo.id, { leadMinutes: 30 });
+		await send(`/api/memos/${memo.id}/occurrences/2026-11-16`, { method: 'PATCH', jar, headers: json, body: JSON.stringify({ completed: true }) });
+		clock = new Date('2026-11-16T09:30:05Z');
+		expect(await run()).toMatchObject({ sent: 0 });
+		expect(sentDms).toHaveLength(0);
+		expect((await list(send, jar))[0].reminder?.at).toBe('2026-11-18T09:30:00.000Z');
+	});
+
+	it('date-only repeating memo needs a time of day (never invented)', async () => {
+		const { send, jar, memo } = await repeating('alice', '매일 물 마시기');
+		expect(memo.title).toBe('물 마시기');
+		expect((await remind(send, jar, memo.id, {})).status).toBe(422);
+		// 12:00 KST now → today 08:00 has passed → tomorrow 08:00 KST.
+		expect(await (await remind(send, jar, memo.id, { time: '08:00' })).json()).toEqual({ scheduledAt: '2026-11-15T23:00:00.000Z' });
+	});
+
+	it('a failed send frees the occurrence for the retry; a permanent refusal stops the series', async () => {
+		const { send, jar, memo } = await repeating('flaky');
+		await remind(send, jar, memo.id, { leadMinutes: 30 });
+		const b = await repeating('blocked');
+		await remind(b.send, b.jar, b.memo.id, { leadMinutes: 30 });
+		clock = new Date('2026-11-16T09:30:05Z');
+		expect(await run()).toMatchObject({ retried: 1, failed: 1, sent: 0 });
+		expect(await deliveries()).toBe(1); // only the refused one stays recorded; the flaky one is free to retry
+		expect((await list(b.send, b.jar))[0].reminder?.status).toBe('failed');
+		expect((await list(send, jar))[0].reminder?.status).toBe('scheduled');
+	});
+
+	it('making the memo one-time cancels the series reminder; others cannot touch the occurrences', async () => {
+		const { send, jar, memo } = await repeating();
+		await remind(send, jar, memo.id, { leadMinutes: 30 });
+		const put = await send(`/api/memos/${memo.id}`, {
+			method: 'PUT',
+			jar,
+			headers: json,
+			body: JSON.stringify({ title: '운동', content: '운동', category: 'schedule', priority: null, dueDate: '2026-11-16', dueTime: '19:00', repeat: null }),
+		});
+		expect(put.status).toBe(200);
+		expect((await list(send, jar))[0].reminder).toBeNull();
+		const bob = (await login(send, 'discord', 'bob')).jar;
+		expect((await send(`/api/memos/${memo.id}/occurrences/2026-11-16`, { method: 'PATCH', jar: bob, headers: json, body: JSON.stringify({ completed: true }) })).status).toBe(404);
+		expect((await send(`/api/memos/${memo.id}/recurrence`, { method: 'POST', jar: bob, headers: json, body: JSON.stringify({ choice: 'repeat' }) })).status).toBe(404);
+		// The guest space cannot see it either.
+		expect((await send(`/api/memos/${memo.id}/occurrences/2026-11-16`, { method: 'PATCH', headers: json, body: JSON.stringify({ completed: true }) })).status).toBe(404);
 	});
 });
 

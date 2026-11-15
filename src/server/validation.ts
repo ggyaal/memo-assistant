@@ -1,6 +1,7 @@
 import * as v from 'valibot';
 import { LIMITS, MEMO_CATEGORIES, MEMO_PRIORITIES, REMINDER_TONES, type MemoCategory, type MemoPriority } from '../shared/types.ts';
-import { hasExplicitTime, normalizeDueAt, reconcileRelativeDate, resolveDueDate } from './time.ts';
+import { clockTimeIn, detectRecurrence, nextOccurrence, repeatWordingFallback, type Recurrence, type RecurrenceQuestion } from '../shared/recurrence.ts';
+import { hasExplicitTime, kstDate, normalizeDueAt, reconcileRelativeDate, resolveDueDate } from './time.ts';
 
 // Strip ASCII control characters except tab/newline.
 // eslint-disable-next-line no-control-regex
@@ -123,6 +124,10 @@ export interface SanitizedMemo {
 	reminder_reason: string | null;
 	priority: MemoPriority | null;
 	priority_reason: string | null;
+	/** Repeating / several-days rule read from due_text by the server (never by the model). */
+	recurrence: Recurrence | null;
+	/** Unclear wording ("월수금", "평일"): the person chooses between these. */
+	recurrence_question: RecurrenceQuestion | null;
 }
 
 function toPriority(value: string | null | undefined): MemoPriority | null {
@@ -156,7 +161,18 @@ export function sanitizeMemo(memo: ModelMemo, rawText: string, now: Date): Sanit
 	let dueAt = dueText && hasExplicitTime(dueText) ? normalizeDueAt(memo.due_at) : null;
 	if (dueAt && dueText) dueAt = reconcileRelativeDate(dueAt, dueText, now);
 
-	const dueDate = resolveDueDate(dueText, dueAt, memo.due_date, now);
+	let dueDate = resolveDueDate(dueText, dueAt, memo.due_date, now);
+
+	// Several days or a repeat ("매주 월수금", "이번 주 월, 목", "평일"): computed here from the
+	// wording, not by the model. due_at/due_date become the first occurrence.
+	// The time: the model's (when it gave one), else a clearly stated time in the wording.
+	const repeatText = dueText ?? repeatWordingFallback(`${memo.title} ${memo.content}`, rawText);
+	const statedTime = dueAt ? kstTimeOf(dueAt) : repeatText && hasExplicitTime(repeatText) ? clockTimeIn(repeatText) : null;
+	const schedule = scheduleFromText(repeatText, statedTime, now);
+	if (schedule) {
+		dueDate = schedule.first;
+		dueAt = schedule.time ? new Date(`${schedule.first}T${schedule.time}:00+09:00`).toISOString() : null;
+	}
 
 	const reminder = memo.reminder_recommended === true;
 	const priority = toPriority(memo.priority);
@@ -175,8 +191,52 @@ export function sanitizeMemo(memo: ModelMemo, rawText: string, now: Date): Sanit
 		reminder_reason: reason,
 		priority,
 		priority_reason: priorityReason,
+		recurrence: schedule?.recurrence ?? null,
+		recurrence_question: schedule?.question ?? null,
 	};
 }
+
+const KST_MS = 9 * 3600_000;
+const kstTimeOf = (isoUtc: string) => new Date(Date.parse(isoUtc) + KST_MS).toISOString().slice(11, 16);
+
+/**
+ * Turn repeat / several-days wording into a rule. With a clock time, an occurrence whose
+ * time has already passed today is skipped (the first one is always still ahead).
+ */
+export function scheduleFromText(
+	dueText: string | null,
+	time: string | null,
+	now: Date,
+): { first: string; time: string | null; recurrence: Recurrence | null; question: RecurrenceQuestion | null } | null {
+	const today = kstDate(now);
+	const detection = detectRecurrence(dueText, today);
+	if (detection.status === 'none') return null;
+	const passed = (day: string) => !!time && Date.parse(`${day}T${time}:00+09:00`) <= now.getTime();
+	const keepDates = (dates: string[]) => dates.filter((d) => !passed(d));
+	const firstOf = (rule: Recurrence): string | null => {
+		const first = nextOccurrence(rule, today);
+		return first && passed(first) ? nextOccurrence(rule, addDay(first)) : first;
+	};
+	if (detection.status === 'once') {
+		const dates = keepDates(detection.rule.dates);
+		if (!dates.length) return null;
+		return { first: dates[0], time, recurrence: { kind: 'dates', dates }, question: null };
+	}
+	if (detection.status === 'recurring') {
+		const first = firstOf(detection.rule);
+		if (!first) return null;
+		const rule = detection.rule.kind === 'dates' ? detection.rule : { ...detection.rule, start: first };
+		return { first, time, recurrence: rule, question: null };
+	}
+	const onceDates = keepDates(detection.question.once.dates);
+	const repeatFirst = firstOf(detection.question.repeat);
+	if (!repeatFirst) return null;
+	const repeat = detection.question.repeat.kind === 'dates' ? detection.question.repeat : { ...detection.question.repeat, start: repeatFirst };
+	const once = { kind: 'dates' as const, dates: onceDates.length ? onceDates : [repeatFirst] };
+	return { first: once.dates[0], time, recurrence: null, question: { repeat, once } };
+}
+
+const addDay = (d: string) => new Date(Date.parse(`${d}T00:00:00Z`) + 86_400_000).toISOString().slice(0, 10);
 
 export function issuesToMessage(issues: v.BaseIssue<unknown>[]): string {
 	return issues[0]?.message ?? '요청 형식이 올바르지 않습니다.';
@@ -203,9 +263,28 @@ export const EditMemoSchema = v.pipe(
 			),
 		),
 		dueTime: v.nullable(v.pipe(v.string(), v.regex(TIME_RE, '시각은 HH:MM 형식이어야 해요.'))),
+		/** Omitted = keep the current rule; null = one-time; else repeat from dueDate. */
+		repeat: v.optional(
+			v.nullable(
+				v.variant('kind', [
+					v.object({ kind: v.literal('daily') }),
+					v.object({
+						kind: v.literal('weekly'),
+						days: v.pipe(v.array(v.picklist([0, 1, 2, 3, 4, 5, 6] as const)), v.minLength(1, '반복할 요일을 골라 주세요.'), v.maxLength(7)),
+						interval: v.picklist([1, 2] as const),
+					}),
+					v.object({ kind: v.literal('monthly') }),
+				]),
+			),
+		),
 	}),
 	v.check((m) => m.dueTime === null || m.dueDate !== null, '시각을 정하려면 날짜도 골라 주세요.'),
+	v.check((m) => !m.repeat || m.dueDate !== null, '반복하려면 시작 날짜를 골라 주세요.'),
 );
+
+export const OccurrenceDoneSchema = v.object({ completed: v.boolean('completed는 true 또는 false여야 합니다.') });
+export const OccurrenceDateSchema = v.pipe(v.string(), v.regex(DATE_RE, '날짜는 YYYY-MM-DD 형식이어야 해요.'));
+export const RecurrenceChoiceSchema = v.object({ choice: v.picklist(['repeat', 'once'], '매주 반복인지 한 번인지 골라 주세요.') });
 export type EditMemoInput = v.InferOutput<typeof EditMemoSchema>;
 
 export const ReminderToneSchema = v.object({

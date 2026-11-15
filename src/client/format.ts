@@ -43,7 +43,9 @@ const dateOnly = new Intl.DateTimeFormat('ko-KR', {
 });
 
 /** "11월 10일 (화) 오후 3:00", or "11월 9일 (월) · 시간 미정" for a date-only deadline. */
-export function formatDue(memo: Pick<Memo, 'due_at' | 'due_date'>): string | null {
+export function formatDue(memo: Pick<Memo, 'due_at' | 'due_date'> & Partial<Pick<Memo, 'occurrence'>>): string | null {
+	// A repeating memo shown as one occurrence: that occurrence's day/time.
+	if (memo.occurrence) return formatDue({ due_at: memo.occurrence.at, due_date: memo.occurrence.date });
 	if (memo.due_at) return formatKst(memo.due_at);
 	if (memo.due_date) return `${dateOnly.format(new Date(`${memo.due_date}T00:00:00+09:00`))} · 시간 미정`;
 	return null;
@@ -60,8 +62,8 @@ export function todayKst(now = new Date()): string {
  * Same rule as the server: a not-done memo is overdue once its exact time has
  * passed, or — for a date-only deadline — once that KST day is over.
  */
-export function isOverdue(memo: Pick<Memo, 'due_at' | 'due_date' | 'completed_at'>, now = new Date()): boolean {
-	if (memo.completed_at) return false;
+export function isOverdue(memo: Pick<Memo, 'due_at' | 'due_date' | 'completed_at'> & Partial<Pick<Memo, 'recurrence'>>, now = new Date()): boolean {
+	if (memo.completed_at || memo.recurrence) return false; // a series is never overdue as a whole
 	if (memo.due_at) return Date.parse(memo.due_at) <= now.getTime();
 	if (memo.due_date) return memo.due_date < todayKst(now);
 	return false;

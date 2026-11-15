@@ -3,7 +3,9 @@ import { CATEGORY_HINTS, CATEGORY_LABELS, formatDue, formatKst, isOverdue, PRIOR
 import type { Memo } from '../shared/types.ts';
 import { useSpace } from '../client/space.ts';
 import { CompleteCheckbox } from './CompleteCheckbox.tsx';
+import { describeRecurrence } from '../shared/recurrence.ts';
 import { MemoEditForm } from './MemoEditForm.tsx';
+import { RecurrenceQuestionBar } from './RecurrenceQuestionBar.tsx';
 import { ReminderControl } from './ReminderControl.tsx';
 
 // All model-produced strings are rendered as plain text nodes (never as HTML).
@@ -61,12 +63,38 @@ export function MemoCard({
 				<h3 className="memo-card__title">{memo.title}</h3>
 			</header>
 			<p className="memo-card__content">{memo.content}</p>
-			{(memo.due_at || memo.due_date || memo.due_text) && (
-				<p className="memo-card__due">
-					<span aria-hidden="true">📅 </span>
-					{formatDue(memo) ?? '정확한 일시 없음'}
+			{memo.recurrence ? (
+				<p className="memo-card__due memo-card__repeat">
+					<span aria-hidden="true">🔁 </span>
+					<strong>{describeRecurrence(memo.recurrence)}</strong>
+					{memo.occurrence ? (
+						<span>
+							{' '}
+							· 이번 회차 {formatDue(memo)}
+							{memo.occurrence.completed_at ? ' ✓ 완료' : ''}
+						</span>
+					) : (
+						<span className="muted"> · 남은 회차 없음</span>
+					)}
 					{memo.due_text && <span className="muted"> · 원문: “{memo.due_text}”</span>}
 				</p>
+			) : (
+				(memo.due_at || memo.due_date || memo.due_text) && (
+					<p className="memo-card__due">
+						<span aria-hidden="true">📅 </span>
+						{formatDue(memo) ?? '정확한 일시 없음'}
+						{memo.due_text && <span className="muted"> · 원문: “{memo.due_text}”</span>}
+					</p>
+				)
+			)}
+			{memo.recurrence_question && (
+				<RecurrenceQuestionBar
+					memo={memo}
+					onAnswered={(saved) => {
+						setMemo(saved);
+						onChanged?.();
+					}}
+				/>
 			)}
 			{memo.reminder_recommended && (
 				<p className="memo-card__reminder">

@@ -23,6 +23,8 @@ function memo(over: Partial<Memo>): Memo {
 		manual_rank: null,
 		completed_at: null,
 		reminder: null,
+		recurrence: null,
+		recurrence_question: null,
 		created_at: '2026-11-09T12:00:00.000Z',
 		...over,
 	};

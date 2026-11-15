@@ -1484,3 +1484,64 @@ p.reminder {
 .memo-input__toggle {
 	flex: none;
 }
+
+/* Repeating schedules */
+.memo-card__repeat strong {
+	font-weight: 600;
+}
+.repeat-question {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	padding: 8px 10px;
+	border: 1px dashed var(--primary);
+	border-radius: 8px;
+	background: var(--bg);
+}
+.repeat-question p {
+	margin: 0;
+}
+.repeat-question__actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px 8px;
+}
+
+.memo-edit__repeat {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+.memo-edit__repeat label {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	font-size: 0.9rem;
+	font-weight: 600;
+}
+.memo-edit__repeat select {
+	width: auto;
+	max-width: min(100%, 260px);
+	font-weight: 400;
+}
+.memo-edit__days {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px;
+}
+.memo-edit__days .chip {
+	min-width: 2.4em;
+	padding: 4px 8px;
+	border-radius: 999px;
+	border: 1px solid var(--border);
+	background: var(--surface);
+	color: var(--text);
+	font: inherit;
+	cursor: pointer;
+}
+.memo-edit__days .chip.is-selected {
+	border-color: var(--primary);
+	background: var(--primary);
+	color: var(--primary-text);
+	font-weight: 600;
+}

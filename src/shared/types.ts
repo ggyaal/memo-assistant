@@ -1,3 +1,4 @@
+import type { Recurrence, RecurrenceQuestion } from './recurrence.ts';
 // Types and limits shared by the React client and the Worker.
 
 export const MEMO_CATEGORIES = ['todo', 'schedule', 'idea', 'note'] as const;
@@ -45,6 +46,12 @@ export interface Memo {
 	completed_at: string | null;
 	/** Discord reminder the owner confirmed (personal spaces only); null if none. */
 	reminder: { at: string; status: ReminderStatus; error: string | null } | null;
+	/** Repeat / several-days rule (due_at/due_date = first occurrence); null = one-time. */
+	recurrence: Recurrence | null;
+	/** Unclear wording: the person picks "every week" or "just these days". */
+	recurrence_question: RecurrenceQuestion | null;
+	/** For a repeating memo shown as one occurrence (list "next", calendar day, agenda). */
+	occurrence?: MemoOccurrence;
 	/** When the memo was saved (UTC ISO 8601). Not the schedule time. */
 	created_at: string;
 }
@@ -85,6 +92,8 @@ export interface EditMemoRequest {
 	priority: MemoPriority | null;
 	dueDate: string | null;
 	dueTime: string | null;
+	/** Omit to keep the current rule; null = one-time; else repeat from dueDate (weekday 0 = 월). */
+	repeat?: { kind: 'daily' } | { kind: 'weekly'; days: number[]; interval: 1 | 2 } | { kind: 'monthly' } | null;
 }
 
 export type ReminderStatus = 'scheduled' | 'sending' | 'sent' | 'failed';
@@ -222,4 +231,11 @@ export interface CalendarResponse {
 	from: string;
 	to: string;
 	memos: Memo[];
+}
+
+/** One occurrence of a repeating memo: its KST day, exact time if the memo has one, and done state. */
+export interface MemoOccurrence {
+	date: string;
+	at: string | null;
+	completed_at: string | null;
 }

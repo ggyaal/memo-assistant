@@ -12,6 +12,7 @@ import type {
 	ListMemosResponse,
 	Memo,
 	MemoCategory,
+	MemoOccurrence,
 	MemoProgressEvent,
 	MemoStreamError,
 	ReminderRequest,
@@ -269,4 +270,22 @@ export function sendTonePreview(): Promise<{ sent: true }> {
 /** Dated memos of one KST month (YYYY-MM), from the same memo rows as the list. */
 export function fetchCalendar(month: string): Promise<CalendarResponse> {
 	return request(`/api/calendar?month=${encodeURIComponent(month)}`);
+}
+
+/** Check or uncheck one occurrence (KST day) of a repeating memo. */
+export function setOccurrenceCompleted(id: string, date: string, completed: boolean): Promise<{ occurrence: MemoOccurrence }> {
+	return request(`/api/memos/${encodeURIComponent(id)}/occurrences/${encodeURIComponent(date)}`, {
+		method: 'PATCH',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({ completed }),
+	});
+}
+
+/** Answer "every week, or just these days?" for unclear wording. */
+export function chooseRecurrence(id: string, choice: 'repeat' | 'once'): Promise<{ memo: Memo }> {
+	return request(`/api/memos/${encodeURIComponent(id)}/recurrence`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({ choice }),
+	});
 }

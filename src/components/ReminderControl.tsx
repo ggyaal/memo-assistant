@@ -84,7 +84,9 @@ export function ReminderControl({ memo, onChanged }: { memo: Memo; onChanged: ()
 		if (scheduled) {
 			return (
 				<p className="reminder reminder--scheduled small">
-					🔔 <strong>{formatKst(r.at)}</strong>에 Discord DM 예약됨
+					🔔 {memo.recurrence ? '매 회차 Discord DM · 다음 ' : ''}
+					<strong>{formatKst(r.at)}</strong>
+					{memo.recurrence ? '' : '에 Discord DM 예약됨'}
 					<button type="button" className="link-button" disabled={busy || r.status === 'sending'} onClick={() => openForm(toKstInput(new Date(r.at)))}>
 						변경
 					</button>
@@ -103,6 +105,19 @@ export function ReminderControl({ memo, onChanged }: { memo: Memo; onChanged: ()
 					🔔 {r?.status === 'sent' ? '알림 다시 받기' : '알림 받기'}
 				</button>
 			</div>
+		);
+	}
+
+	if (memo.recurrence) {
+		return (
+			<RepeatingReminderForm
+				memo={memo}
+				busy={busy}
+				error={error}
+				scheduled={!!scheduled}
+				onSave={(body) => void run(() => scheduleReminder(memo.id, body))}
+				onClose={() => setOpen(false)}
+			/>
 		);
 	}
 
@@ -163,6 +178,70 @@ export function ReminderControl({ memo, onChanged }: { memo: Memo; onChanged: ()
 					{scheduled ? '변경' : '예약'}
 				</button>
 				<button type="button" className="link-button" onClick={() => setOpen(false)}>
+					닫기
+				</button>
+			</div>
+			{error && (
+				<p className="error" role="alert">
+					{error}
+				</p>
+			)}
+		</div>
+	);
+}
+
+/**
+ * A repeating memo is reminded before every occurrence: "정시 / N분 전" when it has a time,
+ * or one time of day when it has dates only. A single picked date/time does not fit a series.
+ */
+function RepeatingReminderForm({
+	memo,
+	busy,
+	error,
+	scheduled,
+	onSave,
+	onClose,
+}: {
+	memo: Memo;
+	busy: boolean;
+	error: string | null;
+	scheduled: boolean;
+	onSave: (body: { leadMinutes: number } | { time: string }) => void;
+	onClose: () => void;
+}) {
+	const { discordReady } = useSpace();
+	const [lead, setLead] = useState(30);
+	const [time, setTime] = useState('09:00');
+	return (
+		<div className="reminder reminder__form small">
+			<p className="muted">🔁 반복 일정이라 매 회차마다 Discord DM으로 알려 드려요.</p>
+			{memo.due_at ? (
+				<label className="reminder__when">
+					알림 시점 (매 회차)
+					<select value={lead} onChange={(e) => setLead(Number(e.target.value))}>
+						<option value={0}>정시</option>
+						<option value={10}>10분 전</option>
+						<option value={30}>30분 전</option>
+						<option value={60}>1시간 전</option>
+					</select>
+				</label>
+			) : (
+				<label className="reminder__when">
+					알림 시각 (회차 날짜마다)
+					<input type="time" value={time} onChange={(e) => setTime(e.target.value)} />
+				</label>
+			)}
+			{!discordReady && <p className="muted">⚙️ 설정에서 Discord 알림을 먼저 켜 주세요.</p>}
+			<div className="reminder__actions">
+				<button
+					type="button"
+					className="primary small"
+					disabled={busy || !discordReady || (!memo.due_at && !time)}
+					onClick={() => onSave(memo.due_at ? { leadMinutes: lead } : { time })}
+				>
+					{scheduled ? '변경' : '예약'}
+				</button>
+				<button type="button" className="link-button" onClick={onClose}>
 					닫기
 				</button>
 			</div>

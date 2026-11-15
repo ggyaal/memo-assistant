@@ -1,5 +1,18 @@
 import type { Memo, MemoCategory, MemoPriority, ReminderStatus } from '../shared/types.ts';
+import { parseRecurrence, type RecurrenceQuestion } from '../shared/recurrence.ts';
 import type { SanitizedMemo } from './validation.ts';
+
+function parseQuestion(value: string | null): RecurrenceQuestion | null {
+	if (!value) return null;
+	try {
+		const q = JSON.parse(value) as { repeat?: unknown; once?: unknown };
+		const repeat = parseRecurrence(q.repeat);
+		const once = parseRecurrence(q.once);
+		return repeat && once?.kind === 'dates' ? { repeat, once } : null;
+	} catch {
+		return null;
+	}
+}
 
 export interface SourceRecord {
 	id: string;
@@ -31,6 +44,8 @@ interface MemoRow {
 	reminder_at: string | null;
 	reminder_status: ReminderStatus | null;
 	reminder_error: string | null;
+	recurrence: string | null;
+	recurrence_question: string | null;
 	position: number;
 	created_at: string;
 }
@@ -39,6 +54,7 @@ const MEMO_SELECT = `
 	SELECT m.id, m.source_id, s.nickname, s.raw_text, m.title, m.content, m.category,
 	       m.due_at, m.due_date, m.due_text, m.reminder_recommended, m.reminder_reason,
 	       m.priority, m.priority_reason, m.manual_rank, m.completed_at, m.position, m.created_at,
+	       m.recurrence, m.recurrence_question,
 	       n.scheduled_at AS reminder_at, n.status AS reminder_status, n.last_error AS reminder_error
 	FROM memos m JOIN sources s ON s.id = m.source_id
 	LEFT JOIN notifications n ON n.memo_id = m.id AND n.channel = 'discord' AND n.status <> 'canceled'`;
@@ -62,6 +78,8 @@ function toMemo(row: MemoRow): Memo {
 		manual_rank: row.manual_rank,
 		completed_at: row.completed_at,
 		reminder: row.reminder_at && row.reminder_status ? { at: row.reminder_at, status: row.reminder_status, error: row.reminder_error } : null,
+		recurrence: parseRecurrence(row.recurrence),
+		recurrence_question: parseQuestion(row.recurrence_question),
 		created_at: row.created_at,
 	};
 }
@@ -105,8 +123,8 @@ export async function saveSourceWithMemos(
 			db
 				.prepare(
 					`INSERT INTO memos (id, source_id, workspace_id, title, content, category, due_at, due_date, due_text,
-					   reminder_recommended, reminder_reason, priority, priority_reason, position, created_at)
-					 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+					   reminder_recommended, reminder_reason, priority, priority_reason, position, created_at, recurrence, recurrence_question)
+					 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 				)
 				.bind(
 					memoIds[index],
@@ -124,6 +142,8 @@ export async function saveSourceWithMemos(
 					memo.priority_reason,
 					index,
 					source.created_at,
+					memo.recurrence ? JSON.stringify(memo.recurrence) : null,
+					memo.recurrence_question ? JSON.stringify(memo.recurrence_question) : null,
 				),
 		),
 	];
@@ -215,7 +235,7 @@ export async function listUpcoming(db: D1Database, workspaceId: string, now: Dat
 	const { results } = await db
 		.prepare(
 			`${MEMO_SELECT}
-			 WHERE m.workspace_id = ? AND m.deleted_at IS NULL
+			 WHERE m.workspace_id = ? AND m.deleted_at IS NULL AND m.recurrence IS NULL
 			   AND ((m.due_at IS NOT NULL AND m.due_at > ?)
 			     OR (m.due_at IS NULL AND m.due_date IS NOT NULL AND m.due_date >= ?))
 			 ORDER BY COALESCE(m.due_at, m.due_date) ASC
@@ -262,7 +282,8 @@ export async function setCompleted(
  * - date only (due_date, KST day): passed once that KST day is over (due_date < today).
  * This is the exact complement of listUpcoming for dated memos; no data is copied.
  */
-const OVERDUE_WHERE = `m.workspace_id = ? AND m.deleted_at IS NULL AND m.completed_at IS NULL
+// Repeating memos never become "overdue" as a whole; their missed occurrences show in the calendar.
+const OVERDUE_WHERE = `m.workspace_id = ? AND m.deleted_at IS NULL AND m.completed_at IS NULL AND m.recurrence IS NULL
 	AND ((m.due_at IS NOT NULL AND m.due_at <= ?)
 	  OR (m.due_at IS NULL AND m.due_date IS NOT NULL AND m.due_date < ?))`;
 
@@ -367,11 +388,48 @@ export async function listCalendar(db: D1Database, workspaceId: string, from: st
 	const { results } = await db
 		.prepare(
 			`${MEMO_SELECT}
-			 WHERE m.workspace_id = ? AND m.deleted_at IS NULL AND m.due_date IS NOT NULL AND m.due_date BETWEEN ? AND ?
+			 WHERE m.workspace_id = ? AND m.deleted_at IS NULL AND m.recurrence IS NULL AND m.due_date IS NOT NULL AND m.due_date BETWEEN ? AND ?
 			 ORDER BY m.due_date ASC, (m.due_at IS NOT NULL) ASC, m.due_at ASC, m.created_at ASC, m.position ASC
 			 LIMIT ?`,
 		)
 		.bind(workspaceId, from, to, max)
 		.all<MemoRow>();
 	return results.map(toMemo);
+}
+
+/** Repeating memos of a workspace (expanded into occurrences by the caller). */
+export async function listRepeating(db: D1Database, workspaceId: string, max = 200): Promise<Memo[]> {
+	const { results } = await db
+		.prepare(`${MEMO_SELECT} WHERE m.workspace_id = ? AND m.deleted_at IS NULL AND m.recurrence IS NOT NULL ORDER BY m.created_at ASC LIMIT ?`)
+		.bind(workspaceId, max)
+		.all<MemoRow>();
+	return results.map(toMemo);
+}
+
+/** Check or uncheck one occurrence of a repeating memo (the memo must be in this workspace). */
+export async function setOccurrenceDone(db: D1Database, memoId: string, day: string, completed: boolean, now: Date): Promise<string | null> {
+	if (completed) {
+		const at = now.toISOString();
+		await db
+			.prepare('INSERT INTO memo_occurrences (memo_id, occurrence_date, completed_at) VALUES (?, ?, ?) ON CONFLICT(memo_id, occurrence_date) DO NOTHING')
+			.bind(memoId, day, at)
+			.run();
+		const row = await db.prepare('SELECT completed_at FROM memo_occurrences WHERE memo_id = ? AND occurrence_date = ?').bind(memoId, day).first<{ completed_at: string }>();
+		return row?.completed_at ?? at;
+	}
+	await db.prepare('DELETE FROM memo_occurrences WHERE memo_id = ? AND occurrence_date = ?').bind(memoId, day).run();
+	return null;
+}
+
+/** Store a repeat rule (or none) and drop the open question. */
+export async function setRecurrence(db: D1Database, workspaceId: string, id: string, rule: unknown | null, first: { due_date: string; due_at: string | null } | null): Promise<boolean> {
+	const res = await db
+		.prepare(
+			`UPDATE memos SET recurrence = ?, recurrence_question = NULL,
+			   due_date = COALESCE(?, due_date), due_at = CASE WHEN ? THEN ? ELSE due_at END
+			 WHERE id = ? AND workspace_id = ? AND deleted_at IS NULL`,
+		)
+		.bind(rule ? JSON.stringify(rule) : null, first?.due_date ?? null, first ? 1 : 0, first?.due_at ?? null, id, workspaceId)
+		.run();
+	return (res.meta.changes ?? 0) > 0;
 }

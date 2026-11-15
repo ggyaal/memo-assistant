@@ -13,6 +13,8 @@ export interface CardMemo {
 	due_at: string | null;
 	/** KST day (YYYY-MM-DD) or null. */
 	due_date: string | null;
+	/** Repeat label ("매주 월·수·금") for a repeating memo's occurrence. */
+	repeat?: string;
 }
 
 export interface CardTiming {
@@ -184,6 +186,7 @@ export function reminderCard(tone: ReminderTone, memo: CardMemo, timing: CardTim
 		{ name: '🗂 분류', value: `${cat.icon} ${cat.label}`, inline: true },
 		{ name: '🔔 알림', value: timingLabel(memo, timing), inline: true },
 		...(when ? [{ name: whenName, value: when, inline: false }] : []),
+		...(memo.repeat ? [{ name: '🔁 반복', value: safeText(memo.repeat, 100), inline: false }] : []),
 	];
 	const embed = {
 		title: `${cat.icon} ${flatText(memo.title, 200)}`,
