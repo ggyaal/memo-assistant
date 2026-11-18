@@ -940,7 +940,7 @@ describe('GET /api/usage', () => {
 		expect(res.status).toBe(200);
 		expect(res.headers.get('cache-control')).toBe('no-store');
 		expect(await res.json()).toEqual({
-			today: { used: 0, limit: 150, resetsAt: '2026-11-10T00:00:00.000Z', neurons: 0, neuronBudget: 6000, actualNeurons: 0 }, // = 09:00 KST
+			today: { used: 0, limit: 150, resetsAt: '2026-11-10T00:00:00.000Z', neurons: 0, neuronBudget: 6000, actualNeurons: 0, nicknameNeurons: 0 }, // = 09:00 KST
 			total: 0,
 			voice: { usedSeconds: 0, limitSeconds: 1800 },
 		});

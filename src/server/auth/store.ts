@@ -1,6 +1,7 @@
 // D1 access for users, social accounts, sessions, OAuth states and workspaces.
 import { randomToken, sha256Hex } from './crypto.ts';
 import type { Profile, Provider } from './providers.ts';
+import { randomNickname } from '../../shared/nickname.ts';
 
 export const SHARED_WORKSPACE_ID = 'ws_shared_guest';
 export const SHARED_WORKSPACE_NAME = '익명의 스케줄';
@@ -23,6 +24,8 @@ export interface SessionUser {
 	refreshed: boolean;
 	/** When this session was created by a provider login (for "recent sign-in" checks). */
 	authenticatedAt: string;
+	/** New account that has not picked or skipped a nickname yet (shown the suggestion card once). */
+	needsNickname: boolean;
 }
 
 export const SHARED_WORKSPACE: Workspace = { id: SHARED_WORKSPACE_ID, kind: 'shared_guest', name: SHARED_WORKSPACE_NAME };
@@ -75,12 +78,15 @@ export async function loginWithProfile(db: D1Database, provider: Provider, profi
 	}
 	const userId = `usr_${crypto.randomUUID()}`;
 	const workspaceId = `ws_${crypto.randomUUID()}`;
+	// The app nickname is separate from the social name: a new account starts with a random one
+	// (no AI here, so sign-up never waits for or fails on AI) and is offered AI suggestions once.
+	const nickname = randomNickname();
 	try {
 		await db.batch([
-			db.prepare('INSERT INTO users (id, display_name, created_at) VALUES (?, ?, ?)').bind(userId, profile.displayName, nowIso),
+			db.prepare('INSERT INTO users (id, display_name, created_at, nickname_pending) VALUES (?, ?, ?, 1)').bind(userId, nickname, nowIso),
 			db
 				.prepare("INSERT INTO workspaces (id, kind, owner_user_id, name, created_at) VALUES (?, 'personal', ?, ?, ?)")
-				.bind(workspaceId, userId, `${profile.displayName}님의 메모`, nowIso),
+				.bind(workspaceId, userId, `${nickname}님의 메모`, nowIso),
 			insertAccount(db, userId, provider, profile, now),
 		]);
 		return userId;
@@ -99,10 +105,10 @@ function insertAccount(db: D1Database, userId: string, provider: Provider, profi
 	const nowIso = now.toISOString();
 	return db
 		.prepare(
-			`INSERT INTO oauth_accounts (id, user_id, provider, provider_subject, display_name, created_at, last_login_at, email, email_verified_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO oauth_accounts (id, user_id, provider, provider_subject, display_name, created_at, last_login_at, email, email_verified_at, avatar_url)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		)
-		.bind(crypto.randomUUID(), userId, provider, profile.subject, profile.displayName, nowIso, nowIso, profile.email, profile.email ? nowIso : null);
+		.bind(crypto.randomUUID(), userId, provider, profile.subject, profile.displayName, nowIso, nowIso, profile.email, profile.email ? nowIso : null, profile.avatarUrl);
 }
 
 /** Latest name and verified address from a fresh login (an address that is no longer verified is dropped). */
@@ -110,11 +116,11 @@ async function refreshAccount(db: D1Database, provider: Provider, profile: Profi
 	const nowIso = now.toISOString();
 	await db
 		.prepare(
-			`UPDATE oauth_accounts SET last_login_at = ?, display_name = ?, email = ?,
+			`UPDATE oauth_accounts SET last_login_at = ?, display_name = ?, email = ?, avatar_url = ?,
 			   email_verified_at = CASE WHEN ? IS NULL THEN NULL WHEN email = ? THEN COALESCE(email_verified_at, ?) ELSE ? END
 			 WHERE provider = ? AND provider_subject = ?`,
 		)
-		.bind(nowIso, profile.displayName, profile.email, profile.email, profile.email, nowIso, nowIso, provider, profile.subject)
+		.bind(nowIso, profile.displayName, profile.email, profile.avatarUrl, profile.email, profile.email, nowIso, nowIso, provider, profile.subject)
 		.run();
 }
 
@@ -148,6 +154,8 @@ export async function linkAccount(db: D1Database, userId: string, provider: Prov
 export interface LinkedAccount {
 	provider: Provider;
 	displayName: string | null;
+	/** Provider profile picture (allow-listed https host) or null. */
+	avatarUrl: string | null;
 	/** Provider-verified address (Google only), shown to the owner in settings. */
 	email: string | null;
 	linkedAt: string;
@@ -155,10 +163,46 @@ export interface LinkedAccount {
 
 export async function listAccounts(db: D1Database, userId: string): Promise<LinkedAccount[]> {
 	const { results } = await db
-		.prepare('SELECT provider, display_name, email, email_verified_at, created_at FROM oauth_accounts WHERE user_id = ? ORDER BY created_at')
+		.prepare('SELECT provider, display_name, email, email_verified_at, avatar_url, created_at FROM oauth_accounts WHERE user_id = ? ORDER BY created_at')
 		.bind(userId)
-		.all<{ provider: Provider; display_name: string | null; email: string | null; email_verified_at: string | null; created_at: string }>();
-	return results.map((r) => ({ provider: r.provider, displayName: r.display_name, email: r.email_verified_at ? r.email : null, linkedAt: r.created_at }));
+		.all<{ provider: Provider; display_name: string | null; email: string | null; email_verified_at: string | null; avatar_url: string | null; created_at: string }>();
+	return results.map((r) => ({
+		provider: r.provider,
+		displayName: r.display_name,
+		avatarUrl: r.avatar_url,
+		email: r.email_verified_at ? r.email : null,
+		linkedAt: r.created_at,
+	}));
+}
+
+// ---- Profile picture and first-login nickname ----------------------------------------------
+
+export type AvatarChoice = Provider | 'none' | null;
+
+export interface AvatarState {
+	/** What the person chose: null = automatic (first linked account with a picture), 'none' = default image. */
+	choice: AvatarChoice;
+	/** The picture to show, or null for the default image. */
+	url: string | null;
+}
+
+export async function resolveAvatar(db: D1Database, userId: string, accounts?: LinkedAccount[]): Promise<AvatarState> {
+	const row = await db.prepare('SELECT avatar_provider FROM users WHERE id = ?').bind(userId).first<{ avatar_provider: string | null }>();
+	const choice = (row?.avatar_provider ?? null) as AvatarChoice;
+	if (choice === 'none') return { choice, url: null };
+	const list = accounts ?? (await listAccounts(db, userId));
+	const chosen = choice ? list.find((a) => a.provider === choice) : list.find((a) => a.avatarUrl);
+	return { choice, url: chosen?.avatarUrl ?? null };
+}
+
+export async function setAvatarChoice(db: D1Database, userId: string, choice: AvatarChoice): Promise<void> {
+	await db.prepare('UPDATE users SET avatar_provider = ? WHERE id = ?').bind(choice, userId).run();
+}
+
+/** The one-time nickname step is over (picked, typed or skipped). Returns false if it was already over. */
+export async function finishNicknameStep(db: D1Database, userId: string): Promise<boolean> {
+	const res = await db.prepare('UPDATE users SET nickname_pending = 0 WHERE id = ? AND nickname_pending = 1').bind(userId).run();
+	return (res.meta.changes ?? 0) > 0;
 }
 
 export type UnlinkResult = 'unlinked' | 'not_linked' | 'last_method';
@@ -217,14 +261,14 @@ export async function readSession(db: D1Database, token: string, now: Date): Pro
 	const nowIso = now.toISOString();
 	const row = await db
 		.prepare(
-			`SELECT s.id, s.user_id, s.last_seen_at, s.created_at, u.display_name, w.id AS workspace_id, w.name AS workspace_name
+			`SELECT s.id, s.user_id, s.last_seen_at, s.created_at, u.display_name, u.nickname_pending, w.id AS workspace_id, w.name AS workspace_name
 			 FROM sessions s
 			 JOIN users u ON u.id = s.user_id
 			 JOIN workspaces w ON w.owner_user_id = s.user_id AND w.kind = 'personal'
 			 WHERE s.id = ? AND s.expires_at > ?`,
 		)
 		.bind(id, nowIso)
-		.first<{ id: string; user_id: string; last_seen_at: string; created_at: string; display_name: string; workspace_id: string; workspace_name: string }>();
+		.first<{ id: string; user_id: string; last_seen_at: string; created_at: string; nickname_pending: number; display_name: string; workspace_id: string; workspace_name: string }>();
 	if (!row) return null;
 	let refreshed = false;
 	if (now.getTime() - Date.parse(row.last_seen_at) > SESSION_REFRESH_MS) {
@@ -241,6 +285,7 @@ export async function readSession(db: D1Database, token: string, now: Date): Pro
 		workspace: { id: row.workspace_id, kind: 'personal', name: row.workspace_name },
 		refreshed,
 		authenticatedAt: row.created_at,
+		needsNickname: row.nickname_pending === 1,
 	};
 }
 

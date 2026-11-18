@@ -19,6 +19,23 @@ export interface Profile {
 	displayName: string;
 	/** An address the provider itself verified (Google email_verified), else null. Never an account key. */
 	email: string | null;
+	/** Profile picture on an allow-listed https image host, else null (declined / none / default image). */
+	avatarUrl: string | null;
+}
+
+/** Image hosts the providers serve profile pictures from (also allowed by the page's CSP img-src). */
+export const AVATAR_HOSTS = ['googleusercontent.com', 'cdn.discordapp.com', 'kakaocdn.net'];
+
+/** Only an https URL on a known image host; Kakao's older http:// links are upgraded. */
+export function safeAvatarUrl(value: unknown): string | null {
+	if (typeof value !== 'string' || value.length > 500) return null;
+	try {
+		const url = new URL(value.startsWith('http://') && /kakaocdn\.net/.test(value) ? `https://${value.slice(7)}` : value);
+		const okHost = AVATAR_HOSTS.some((h) => url.hostname === h || url.hostname.endsWith(`.${h}`));
+		return url.protocol === 'https:' && okHost && !url.username && !url.password ? url.toString() : null;
+	} catch {
+		return null;
+	}
 }
 
 interface TokenResponse {
@@ -84,7 +101,7 @@ const SPECS: Record<Provider, ProviderSpec> = {
 				fetchFn: ctx.fetchFn,
 			});
 			const email = claims.email_verified && claims.email && claims.email.length <= 254 ? claims.email.toLowerCase() : null;
-			return { subject: claims.sub, displayName: clipName(claims.name, 'Google 사용자'), email };
+			return { subject: claims.sub, displayName: clipName(claims.name, 'Google 사용자'), email, avatarUrl: safeAvatarUrl(claims.picture) };
 		},
 	},
 	discord: {
@@ -99,26 +116,32 @@ const SPECS: Record<Provider, ProviderSpec> = {
 		async readProfile(token, ctx) {
 			const me = await getJson(ctx.fetchFn, 'https://discord.com/api/users/@me', accessToken(token));
 			if (typeof me.id !== 'string') throw new Error('discord profile without id');
-			return { subject: me.id, displayName: clipName(me.global_name ?? me.username, 'Discord 사용자'), email: null };
+			const avatarUrl =
+				typeof me.avatar === 'string' && /^(a_)?[0-9a-f]{32}$/.test(me.avatar) ? safeAvatarUrl(`https://cdn.discordapp.com/avatars/${me.id}/${me.avatar}.png?size=128`) : null;
+			return { subject: me.id, displayName: clipName(me.global_name ?? me.username, 'Discord 사용자'), email: null, avatarUrl };
 		},
 	},
 	kakao: {
 		label: '카카오',
 		authorizeUrl: 'https://kauth.kakao.com/oauth/authorize',
 		tokenUrl: 'https://kauth.kakao.com/oauth/token',
-		scope: 'profile_nickname',
+		// Exactly the consent items set in the console (both optional). Comma-separated per Kakao docs.
+		// No account_email (no permission), no talk_message, no openid: the id from /v2/user/me is enough.
+		scope: 'profile_nickname,profile_image',
 		clientId: (env) => env.KAKAO_REST_API_KEY,
 		clientSecret: (env) => env.KAKAO_CLIENT_SECRET,
 		secretRequired: false,
 		pkce: false,
 		async readProfile(token, ctx) {
-			// `id` (회원번호) is the immutable identity; the nickname is only a display name.
+			// `id` (회원번호) is the immutable identity. Nickname and picture are optional consents:
+			// declining either still signs the person in (fallback name / default image).
 			const me = await getJson(ctx.fetchFn, 'https://kapi.kakao.com/v2/user/me', accessToken(token));
 			if (typeof me.id !== 'number' && typeof me.id !== 'string') throw new Error('kakao profile without id');
 			const account = (me.kakao_account ?? {}) as Record<string, unknown>;
 			const profile = (account.profile ?? {}) as Record<string, unknown>;
 			const props = (me.properties ?? {}) as Record<string, unknown>;
-			return { subject: String(me.id), displayName: clipName(profile.nickname ?? props.nickname, '카카오 사용자'), email: null };
+			const avatarUrl = profile.is_default_image === true ? null : safeAvatarUrl(profile.profile_image_url ?? props.profile_image);
+			return { subject: String(me.id), displayName: clipName(profile.nickname ?? props.nickname, '카카오 사용자'), email: null, avatarUrl };
 		},
 	},
 };

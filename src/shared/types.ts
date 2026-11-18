@@ -155,10 +155,12 @@ export interface ChannelStatus {
 
 export interface SettingsResponse {
 	displayName: string;
+	/** choice: null = automatic, 'none' = default image, or a provider; url null = default image. */
+	avatar: { choice: 'google' | 'discord' | 'kakao' | 'none' | null; url: string | null };
 	timezone: string;
 	linked: ('google' | 'discord' | 'kakao')[];
 	/** Linked login methods; `email` is a provider-verified address (Google), shown to the owner only. */
-	accounts: { provider: 'google' | 'discord' | 'kakao'; displayName: string | null; email: string | null; linkedAt: string }[];
+	accounts: { provider: 'google' | 'discord' | 'kakao'; displayName: string | null; avatarUrl: string | null; email: string | null; linkedAt: string }[];
 	/** Linking/unlinking needs a sign-in within the last 10 minutes. */
 	accountChanges: { allowed: boolean; until: string | null };
 	notifications: ChannelStatus[];
@@ -172,7 +174,16 @@ export interface UsageResponse {
 	/** `neurons`/`neuronBudget`: estimated cost of memo organizing today vs. its daily budget. */
 	/** used = AI organize requests; neurons = estimate reserved before each call (budget check);
 	 *  actualNeurons = measured from real token counts after each call (organizing only, not voice). */
-	today: { used: number; limit: number; resetsAt: string; neurons: number; neuronBudget: number; actualNeurons: number };
+	today: {
+		used: number;
+		limit: number;
+		resetsAt: string;
+		neurons: number;
+		neuronBudget: number;
+		actualNeurons: number;
+		/** Measured Neurons of AI nickname suggestions today (kept apart from memo organizing). */
+		nicknameNeurons?: number;
+	};
 	/** All-time AI requests since launch. */
 	total: number;
 	/** Voice-to-text audio seconds today (same UTC day) and the daily budget. */

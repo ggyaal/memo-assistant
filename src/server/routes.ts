@@ -47,11 +47,14 @@ import {
 	estimateMemoNeurons,
 	readUsage,
 	recordActualNeurons,
+	nicknameNeuronsToday,
 	voiceSecondsUsed,
 } from './rate-limit.ts';
 import { describeSensitive, detectSensitive } from '../shared/privacy.ts';
 import type { AuthEnv } from './auth/providers.ts';
-import { linkedProviders, listAccounts, unlinkAccount } from './auth/store.ts';
+import { type AvatarChoice, finishNicknameStep, linkedProviders, listAccounts, resolveAvatar, setAvatarChoice, unlinkAccount } from './auth/store.ts';
+import { type NicknameGenerator, suggestNicknames, workersAiModel, workersAiNicknames } from './nickname-ai.ts';
+import { nicknameProblem } from '../shared/nickname.ts';
 import { isProvider } from './auth/providers.ts';
 import {
 	autoScheduleRecommended,
@@ -105,7 +108,14 @@ export interface ApiBindings extends AuthEnv, SettingsEnv {
 	RATE_LIMIT_PER_MINUTE?: string;
 	DAILY_AI_LIMIT?: string;
 	DAILY_AI_NEURONS?: string;
+	/** Flue model id of memo organizing; nickname suggestions use the same Workers AI model. */
+	MEMO_MODEL?: string;
 }
+
+/** Pre-check estimate for one nickname suggestion call (measured: see docs/AI_CLARIFICATION_BUDGET.md §9). */
+export const NICKNAME_ESTIMATED_NEURONS = 5; // measured 2.3–3.3 per call (2026-11-19), rounded up
+/** AI nickname suggestions per user per UTC day (first suggestion + "다시 추천" + settings). */
+export const NICKNAME_AI_PER_DAY = 10;
 
 export interface ApiDeps {
 	runAgent: RunMemoAgent;
@@ -117,6 +127,8 @@ export interface ApiDeps {
 	agentTimeoutMs?: number;
 	/** Used for OAuth token/profile requests; injectable for tests. */
 	fetchFn?: typeof fetch;
+	/** AI nickname generator (tests inject a fake; null = never call AI). Default: Workers AI, same model. */
+	nicknames?: NicknameGenerator | null;
 }
 
 type ApiEnv = { Bindings: ApiBindings; Variables: AuthVariables };
@@ -267,7 +279,8 @@ export function createApi(deps: ApiDeps) {
 	api.get('/usage', async (c) => {
 		try {
 			const usage = await readUsage(c.env.DB, dailyLimit(c.env), now(), VOICE_SECONDS_PER_DAY, neuronBudget(c.env));
-			return c.json<UsageResponse>(usage);
+			const nicknameNeurons = await nicknameNeuronsToday(c.env.DB, now());
+			return c.json<UsageResponse>({ ...usage, today: { ...usage.today, nicknameNeurons } });
 		} catch (error) {
 			console.error('read usage failed', describeError(error));
 			return fail(c, 500, 'db_error', '사용량을 불러오지 못했습니다.');
@@ -388,8 +401,10 @@ export function createApi(deps: ApiDeps) {
 		const accounts = await listAccounts(c.env.DB, user.userId);
 		const linked = accounts.map((a) => a.provider);
 		const recent = recentlyAuthenticated(user, now());
+		const avatar = await resolveAvatar(c.env.DB, user.userId, accounts);
 		return c.json<SettingsResponse>({
 			displayName: user.displayName,
+			avatar: { choice: avatar.choice, url: avatar.url },
 			timezone: 'Asia/Seoul',
 			linked,
 			accounts,
@@ -401,6 +416,91 @@ export function createApi(deps: ApiDeps) {
 			reminderDefaults: await getReminderDefaults(c.env.DB, user.userId),
 			reminderTone: await getReminderTone(c.env.DB, user.userId),
 		});
+	});
+
+	// ---- Nickname (app display name; never an identifier) ------------------------------------
+	// Three suggestions from ONE AI call (no personal data in the prompt). Any AI problem, the daily
+	// app budget or the per-user cap gives fallback names instead — never an error for the person.
+	api.post('/profile/nickname-suggestions', async (c) => {
+		const blocked = crossSiteBlock(c, false);
+		if (blocked) return blocked;
+		const { user } = c.get('auth');
+		if (!user) return fail(c, 401, 'login_required', '로그인이 필요합니다.');
+		const at = now();
+		const db = c.env.DB;
+		const generator =
+			deps.nicknames !== undefined ? deps.nicknames : c.env.AI ? workersAiNicknames(c.env.AI, workersAiModel(c.env.MEMO_MODEL)) : null;
+		let useAi = !!generator;
+		if (useAi) {
+			const mine = await consumeWindow(db, `nick-ai:${user.userId}`, NICKNAME_AI_PER_DAY, 86_400_000, at);
+			useAi = mine.allowed;
+		}
+		if (useAi) {
+			const decision = await consumeAiQuota(
+				db,
+				await clientKey(c.req.header('cf-connecting-ip')),
+				{ perMinute: toPositiveInt(c.env.RATE_LIMIT_PER_MINUTE, 5), perDay: dailyLimit(c.env), neuronBudget: neuronBudget(c.env) },
+				at,
+				NICKNAME_ESTIMATED_NEURONS,
+			);
+			useAi = decision.allowed;
+		}
+		const started = Date.now();
+		const result = await suggestNicknames(useAi ? generator : null);
+		if (result.usage) {
+			const neurons = await recordActualNeurons(db, result.usage, at, 'nickname').catch(() => null);
+			console.log(JSON.stringify({ event: 'ai_usage', kind: 'nickname', input: result.usage.input, output: result.usage.output, neurons, ms: Date.now() - started, source: result.source }));
+		}
+		return c.json({ suggestions: result.suggestions, source: result.source });
+	});
+
+	// Pick, type or keep a nickname. `firstLogin` also ends the one-time suggestion step.
+	api.put('/profile/nickname', async (c) => {
+		const blocked = crossSiteBlock(c, true);
+		if (blocked) return blocked;
+		const { user } = c.get('auth');
+		if (!user) return fail(c, 401, 'login_required', '로그인이 필요합니다.');
+		const parsed = v.safeParse(DisplayNameSchema, (await readJson(c)) ?? null);
+		if (!parsed.success) return fail(c, 400, 'invalid_request', issuesToMessage(parsed.issues));
+		const problem = nicknameProblem(parsed.output.displayName);
+		if (problem) return fail(c, 422, 'invalid_request', problem);
+		const limited = await mutationLimit(c, now());
+		if (limited) return limited;
+		// Only the display name changes: memos stay in the same personal space (ownership = workspace id).
+		await setDisplayName(c.env.DB, user.userId, user.workspace.id, parsed.output.displayName);
+		await finishNicknameStep(c.env.DB, user.userId);
+		return c.json({ displayName: parsed.output.displayName });
+	});
+
+	// "건너뛰기": keep the random nickname the account started with.
+	api.post('/profile/nickname/skip', async (c) => {
+		const blocked = crossSiteBlock(c, false);
+		if (blocked) return blocked;
+		const { user } = c.get('auth');
+		if (!user) return fail(c, 401, 'login_required', '로그인이 필요합니다.');
+		await finishNicknameStep(c.env.DB, user.userId);
+		return c.json({ displayName: user.displayName });
+	});
+
+	// Which profile picture to show: automatic, one linked account's picture, or the default image.
+	api.put('/settings/avatar', async (c) => {
+		const blocked = crossSiteBlock(c, true);
+		if (blocked) return blocked;
+		const { user } = c.get('auth');
+		if (!user) return fail(c, 401, 'login_required', '로그인이 필요합니다.');
+		const body = (await readJson(c)) as { choice?: unknown } | undefined;
+		const choice = body?.choice;
+		const allowed: AvatarChoice[] = [null, 'none', 'google', 'discord', 'kakao'];
+		if (!body || !allowed.includes(choice as AvatarChoice)) return fail(c, 400, 'invalid_request', '프로필 사진 선택이 올바르지 않아요.');
+		const accounts = await listAccounts(c.env.DB, user.userId);
+		if (choice && choice !== 'none' && !accounts.some((a) => a.provider === choice && a.avatarUrl)) {
+			return fail(c, 422, 'invalid_request', '그 계정에는 프로필 사진이 없어요.');
+		}
+		const limited = await mutationLimit(c, now());
+		if (limited) return limited;
+		await setAvatarChoice(c.env.DB, user.userId, choice as AvatarChoice);
+		const avatar = await resolveAvatar(c.env.DB, user.userId, accounts);
+		return c.json({ avatar });
 	});
 
 	// Remove one login method (never the last one). Needs a recent sign-in, like linking.
@@ -486,9 +586,12 @@ export function createApi(deps: ApiDeps) {
 		if (body === undefined) return fail(c, 400, 'invalid_request', 'JSON 형식이 올바르지 않습니다.');
 		const parsed = v.safeParse(DisplayNameSchema, body);
 		if (!parsed.success) return fail(c, 400, 'invalid_request', issuesToMessage(parsed.issues));
+		const problem = nicknameProblem(parsed.output.displayName);
+		if (problem) return fail(c, 422, 'invalid_request', problem);
 		const limited = await mutationLimit(c, now());
 		if (limited) return limited;
 		await setDisplayName(c.env.DB, user.userId, user.workspace.id, parsed.output.displayName);
+		await finishNicknameStep(c.env.DB, user.userId);
 		return c.json({ displayName: parsed.output.displayName });
 	});
 

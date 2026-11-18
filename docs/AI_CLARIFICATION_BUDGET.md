@@ -86,6 +86,17 @@
 - 앱 "실측": 운영 Worker의 **메모 정리 응답 토큰**만 공식 단가로 환산한 값입니다. 음성·로컬 개발·응답을 받지 못한 호출은 빠집니다.
 - 앱 "예상"과 "%": 요청 전 차감한 추정치입니다. 실패·취소도 포함되므로 실측보다 클 수 있습니다.
 
+## 9. AI 닉네임 추천 (2026-11-19 추가)
+| 항목 | 값 |
+|---|---|
+| 모델 | 메모 정리와 같은 `@cf/zai-org/glm-4.7-flash`(Workers AI 바인딩 직접 호출, `chat_template_kwargs.enable_thinking=false`, 출력 상한 150토큰) |
+| 호출 시점 | 새 계정의 추천 카드가 처음 열릴 때 1회, 「다시 추천」·설정 「AI 닉네임 추천 받기」마다 1회. **가입·재로그인 자체는 AI를 부르지 않음**(무작위 닉네임을 먼저 줌) |
+| 입력 | 고정 지시문 + 무작위 분위기 단어 1개. 소셜 이름·이메일·id 등 개인정보 없음(테스트로 확인) |
+| 실측 (로컬 `npm run dev`, 6회) | 4회 응답: 입력 189–198 / 출력 33–61 토큰 → **2.3–3.3 Neurons**, 1.9–3.7초. 2회는 시간 초과(15초·8초) → 일반 무작위 추천으로 대체(이 2회의 비용은 **미측정**) |
+| 제한 | 사용자당 하루 10회(넘으면 무작위 추천), 앱 공통 하루 요청 수·예상 Neurons에 1회당 5 Neurons로 포함(`NICKNAME_ESTIMATED_NEURONS`) |
+| 실측 기록 | `ai-nick-mn:<UTC날짜>` 카운터, `/api/usage`의 `today.nicknameNeurons`, 로그 `{"event":"ai_usage","kind":"nickname"}` — 메모 정리 실측과 따로 |
+| 하루 영향 (가정) | 신규 가입 20명 × 평균 2회 = 40회 ≈ 120 Neurons(무료 10,000의 약 1.2%) |
+
 ## 8. 측정 방법과 재현
 - 에이전트가 `useResponseFinish`로 응답 전체(모든 턴)의 `usage.input/output`을 메타데이터에 붙이고, 서버가 `neuronsFromTokens`로 환산해 기록하고 `{"event":"ai_usage",...}`로 로그에 남깁니다.
 - 재현: `npm run dev`(실제 AI, 무료 Neuron 사용) → 같은 6개 입력을 `POST /api/memos`(JSON)로 보냄 → dev 로그에서 `ai_usage` 줄 확인 → 초안은 `POST /api/memo-drafts/:id/commit`로 확정하고 `ai_usage` 줄이 늘지 않는지 확인.

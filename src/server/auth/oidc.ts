@@ -11,6 +11,7 @@ const JWKS_CACHE_MS = 60 * 60 * 1000;
 export interface GoogleClaims {
 	sub: string;
 	name?: string;
+	picture?: string;
 	email?: string;
 	email_verified?: boolean;
 }
@@ -96,6 +97,7 @@ export async function verifyGoogleIdToken(
 	return {
 		sub: claims.sub,
 		name: typeof claims.name === 'string' ? claims.name : undefined,
+		picture: typeof claims.picture === 'string' ? claims.picture : undefined,
 		email: typeof claims.email === 'string' ? claims.email : undefined,
 		email_verified: claims.email_verified === true || claims.email_verified === 'true',
 	};

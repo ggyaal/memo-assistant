@@ -224,10 +224,35 @@
   - **실제 Google·카카오 로그인과 메일 수신은 사용자 확인이 남아 있다.**
 - 이메일 발송량·비용(가정): 개인 사용자 10명 × 하루 알림 3건 ≈ 월 900통이다. Resend Free(월 3,000·하루 100) 안이며, 넘으면 앱 상한(90/일)에서 `email_daily_limit`으로 실패 기록된다(과금 없음, Pro는 월 $20·50,000통). AI 비용과는 별개이며 **발송 경로에서 AI 호출 0회**다(테스트로 확인).
 
-## 7. 실행한 검증 (마지막 실행: 2026-11-18)
+## 6-2. 카카오 동의항목 정리와 AI 닉네임 (2026-11-19 구현·운영 배포)
+| 항목 | 결과 |
+|---|---|
+| 카카오 scope | `profile_nickname,profile_image`(콘솔의 선택 동의 2개와 정확히 일치, 쉼표 구분). `account_email`·`talk_message`·`openid` 요청하지 않음. KOE205(콘솔에 없는 동의항목 요청)는 요청 scope를 콘솔 설정과 맞춰 해결 — **실제 카카오 로그인으로는 아직 확인하지 않음** |
+| openid | 요청하지 않는다. 사용자 식별은 `/v2/user/me`의 회원번호 `id`로 충분하고, OIDC가 주는 이메일 권한도 없다. 콘솔에서 OIDC를 켜 두어도 받은 id_token은 쓰지 않는다 |
+| 선택 동의 거부 | 닉네임·사진을 모두 거부해도 로그인·가입됨(테스트: 이름 "카카오 사용자", 사진 없음 → 기본 이미지). 이메일 없이도 동작 |
+| 프로필 사진 | Google `picture`, Discord 아바타, 카카오 `profile_image_url`(기본 이미지면 저장 안 함, http → https). 허용한 https 이미지 호스트만 저장. CSP `img-src`에 그 호스트만 추가, `referrerPolicy=no-referrer`. 설정에서 자동/계정별/기본 이미지 선택 |
+| 닉네임 정책 | 새 계정은 무작위 닉네임으로 바로 시작(AI 없이)하고 `nickname_pending=1`. 첫 화면 카드에서 AI 추천 3개(1회 호출) → 고르기·다시 추천(추가 1회)·직접 입력·건너뛰기. 한 번 끝나면 다시 묻지 않음. 기존 사용자는 닉네임·카드 모두 그대로(0017 기본값 0). 소셜 이름(`oauth_accounts.display_name`)과 앱 닉네임(`users.display_name`) 분리. 계정 연결은 닉네임을 바꾸지 않음 |
+| AI 검증·필터 | JSON/코드펜스/줄 단위 파싱, 한글·공백만, 16자 이하, 금칙어·개인정보 패턴 차단, 중복 제거, 모자라면 무작위로 채움. 실패·시간 초과(8초)·예산 초과 → 무작위 3개(오류 아님) |
+| AI 비용 | `docs/AI_CLARIFICATION_BUDGET.md` §9. 실측 1회 2.3–3.3 Neurons |
+
+- 마이그레이션 `0017_profile_nickname.sql`(추가만): `oauth_accounts.avatar_url`, `users.nickname_pending`(기본 0), `users.avatar_provider`. 되돌리기 `docs/rollback/0017_down.sql`. `tests/migration-0016.test.ts`에서 기존 사용자의 닉네임 유지·`nickname_pending=0` 확인.
+- 실제 AI 호출: 로컬 6회(위 측정). 운영 호출 없음.
+- **운영 반영 (2026-11-19, 사용자 요청)**:
+  - D1: 백업(`.wrangler/backups/prod-20261119-pre-0017.sql`)한 뒤 0017을 적용했다. 전후 users 3·oauth_accounts 3·sources 33·memos 46·notifications 12 그대로, 기존 사용자 닉네임 그대로, `nickname_pending` 합계 0(기존 사용자에게 추천 카드 없음).
+  - 배포: Version `6429ed89-0e08-43ee-b3fa-d62cebcfe86a`.
+  - 운영 확인(로그인 없이):
+    - 홈 200, CSP `img-src`에 사진 호스트 3개
+    - 카카오 시작 주소: `scope=profile_nickname,profile_image`
+    - 비로그인 추천·닉네임·사진 401, 다른 사이트 추천 403
+    - `/api/usage`에 `nicknameNeurons`
+  - **실제 카카오 로그인(KOE205 해소)과 신규 가입 추천 카드는 사용자 확인이 남아 있다.**
+- 브라우저(헤드리스, `dev:offline`, API 모킹, 1100px 라이트·360px 다크): 첫 로그인 카드 → 다시 추천 → 선택 → 카드 사라짐·상단 이름 반영, 설정 프로필(기본 이미지·사진 선택·AI 추천). 첫 추천 1회, 다시 추천 +1회, 가로 스크롤 없음. 라디오가 전역 input 폭으로 늘어나던 것 수정.
+
+## 7. 실행한 검증 (마지막 실행: 2026-11-19)
 | 명령 | 결과 |
 |---|---|
 | `npm run check:types` | 성공 |
+| `npm test` (2026-11-19) | 19개 파일, **453개 테스트** 통과(카카오 선택 동의 거부·scope, 프로필 사진 허용 호스트·선택, AI 닉네임: 세 공급자 신규 가입·1회 호출·개인정보 없음·다시 추천·실패/이상 출력 대체·사용자/앱 한도·실측 기록·건너뛰기·입력 검사·이름 변경 후 소유 유지·연결 시 유지) |
 | `npm test` (2026-11-18) | 18개 파일, **434개 테스트** 통과: Google OIDC(위조 서명·다른 aud·만료·nonce 불일치 거부), 카카오(PKCE 미전송·REST 키·회원번호), 연결·해제(10분 재인증·마지막 수단·남의 계정·같은 종류 중복), 이메일(기본 꺼짐·테스트 메일 접수 후에만 켜짐·발신자 없으면 성공 처리 없음·채널 독립 재시도·중복 없음·완료 메모 제외·AI 0회), 템플릿 escape·text/plain·모바일, 0016 데이터 보존 |
 | `npm test` | 16개 파일, **405개 테스트** 통과 (로그인·격리·설정·Discord 알림·정각 발송·SSE 진행·취소·알림 시각 규칙·메모 수정·아이디어 목록 포함) |
 | `npm run test:worker` | **9개 테스트** 통과 (빌드 Worker, workerd, CORS 없음, 403/415, `/api/usage`, `/api/agenda`, `/api/transcribe` 검증) |

@@ -70,6 +70,7 @@ AX School **Build Your Agent** 과제용으로, 여러 사람이 공개 체험�
 - Google·카카오 로그인(2026-11-18): Google은 ID 토큰을 `src/server/auth/oidc.ts`에서 검증(JWKS 서명·iss·aud·exp·nonce)한 뒤 `sub`로만 식별하고, `email_verified`인 주소만 `oauth_accounts.email`에 둔다(계정 찾기·합치기에 쓰지 않음). 카카오는 공식 문서에 PKCE가 없어 보내지 않는다(`pkce: false`). 계정 연결·해제는 세션 생성 10분 이내(`recentlyAuthenticated`)만, 마지막 로그인 수단 해제 금지, 사용자당 같은 종류 1개.
 - 이메일 알림: 서비스가 `src/server/notify/email.ts`의 어댑터(Resend)로 보낸다. Gmail API·사용자 권한은 쓰지 않는다. `EMAIL_API_KEY`·`EMAIL_FROM`이 없으면 `notConfiguredSender`가 항상 실패를 돌려준다(성공 처리 금지). 수신 주소는 Google 인증 주소뿐이고, 켤 때 테스트 메일이 접수되어야 켠다. `accepted`는 공급자 접수이지 수신 확인이 아니다.
 - 알림 행(`notifications`)은 메모당 1개인 일정이고 `channel` 값은 항상 `'discord'`(UNIQUE 키 호환)다. 실제 대상은 `channels`(NULL = 켜 둔 모든 채널)다. 채널마다 `reminder_deliveries`로 멱등을 보장하고(1회성 키 `once@<scheduled_at>`), 시도는 `notification_attempts`에 남긴다. 일시 오류는 그 채널만 재시도한다.
+- 닉네임(2026-11-19): 앱 닉네임 `users.display_name`은 소셜 이름(`oauth_accounts.display_name`)과 따로이며 식별자로 쓰지 않는다. 새 계정은 `randomNickname()`으로 바로 만들고(가입 경로에서 AI 호출 금지) `nickname_pending=1`로 추천 카드를 한 번만 보인다. AI 추천은 `POST /api/profile/nickname-suggestions`에서만, 1회 호출로 3개, 프롬프트에 개인정보를 넣지 않는다. 실패·한도 초과는 무작위 추천으로 대체(오류 아님). 카카오 scope는 콘솔 동의항목(`profile_nickname,profile_image`, 선택)과 정확히 맞춘다.
 - 에이전트 이름을 바꾸면 Durable Object 클래스명이 바뀐다. `wrangler.jsonc` migrations에 새 태그를 추가하고(`renamed_classes` 등) 기존 항목은 수정하지 않는다. `wrangler.jsonc`를 수정했다면 `npm run cf-typegen`을 다시 실행한다.
 
 ### 실행·검증 명령

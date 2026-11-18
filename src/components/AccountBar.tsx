@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { MeResponse } from '../client/api.ts';
+import { Avatar } from './Avatar.tsx';
 
 /** Current space + account actions (linking, logout) or a way back to login for guests. */
 export function AccountBar({
@@ -28,7 +29,10 @@ export function AccountBar({
 		<div className="account-bar">
 			<span className="space-badge space-badge--personal">🔒 {me.workspace.name} · 나만 보기</span>
 			<span className="account-bar__links small">
-				<span className="muted">{me.user.displayName} · {me.user.linked.map((id) => me.providers[id].label).join(', ')}</span>
+				<span className="account-bar__who muted">
+					<Avatar url={me.user.avatarUrl} size={22} />
+					{me.user.displayName} · {me.user.linked.map((id) => me.providers[id].label).join(', ')}
+				</span>
 				{onSettings && (
 					<button type="button" className="link-button" onClick={onSettings}>
 						⚙️ 설정

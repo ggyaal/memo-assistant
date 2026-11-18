@@ -211,14 +211,29 @@ export function neuronsFromTokens(usage: { input: number; output: number }): num
 }
 
 const ACTUAL_PREFIX = 'ai-actual-mn:'; // milli-Neurons actually used by memo organizing, per UTC day
+const NICKNAME_ACTUAL_PREFIX = 'ai-nick-mn:'; // the same, for nickname suggestions (kept apart)
 
 /** Record real usage of one run (kept apart from the pre-check estimate). Returns the Neurons added. */
-export async function recordActualNeurons(db: D1Database, usage: { input: number; output: number }, now: Date): Promise<number> {
+export async function recordActualNeurons(
+	db: D1Database,
+	usage: { input: number; output: number },
+	now: Date,
+	kind: 'organize' | 'nickname' = 'organize',
+): Promise<number> {
 	const neurons = neuronsFromTokens(usage);
 	const day = now.toISOString().slice(0, 10);
 	const end = new Date(Date.parse(`${day}T00:00:00Z`) + 2 * 86_400_000).toISOString();
-	await addTo(db, `${ACTUAL_PREFIX}${day}`, Math.round(neurons * 1000), end);
+	await addTo(db, `${kind === 'nickname' ? NICKNAME_ACTUAL_PREFIX : ACTUAL_PREFIX}${day}`, Math.round(neurons * 1000), end);
 	return neurons;
+}
+
+/** Measured Neurons of nickname suggestions today (UTC day). */
+export async function nicknameNeuronsToday(db: D1Database, now: Date): Promise<number> {
+	const row = await db
+		.prepare('SELECT count FROM usage_counters WHERE counter_key = ?')
+		.bind(`${NICKNAME_ACTUAL_PREFIX}${now.toISOString().slice(0, 10)}`)
+		.first<{ count: number }>();
+	return Math.round((row?.count ?? 0) / 100) / 10;
 }
 
 export async function actualNeuronsToday(db: D1Database, now: Date): Promise<number> {

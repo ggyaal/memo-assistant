@@ -221,7 +221,7 @@ export type ProviderId = 'google' | 'discord' | 'kakao';
 export interface MeResponse {
 	mode: 'guest' | 'user';
 	workspace: { id: string; kind: 'shared_guest' | 'personal'; name: string };
-	user?: { displayName: string; linked: ProviderId[] };
+	user?: { displayName: string; linked: ProviderId[]; avatarUrl?: string | null; needsNickname?: boolean };
 	providers: Record<ProviderId, { label: string; configured: boolean }>;
 }
 
@@ -242,6 +242,38 @@ export function updateDisplayName(displayName: string): Promise<{ displayName: s
 		method: 'PATCH',
 		headers: { 'content-type': 'application/json' },
 		body: JSON.stringify({ displayName }),
+	});
+}
+
+export interface NicknameSuggestionsResponse {
+	suggestions: { name: string; emoji: string }[];
+	source: 'ai' | 'fallback';
+}
+
+/** Three nickname ideas (one AI call; fallback names when AI is unavailable). */
+export function fetchNicknameSuggestions(): Promise<NicknameSuggestionsResponse> {
+	return request('/api/profile/nickname-suggestions', { method: 'POST' });
+}
+
+/** Save the app nickname (also ends the first-login suggestion step). */
+export function chooseNickname(displayName: string): Promise<{ displayName: string }> {
+	return request('/api/profile/nickname', {
+		method: 'PUT',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({ displayName }),
+	});
+}
+
+/** "건너뛰기": keep the random nickname the account started with. */
+export function skipNickname(): Promise<{ displayName: string }> {
+	return request('/api/profile/nickname/skip', { method: 'POST' });
+}
+
+export function updateAvatar(choice: SettingsResponse['avatar']['choice']): Promise<{ avatar: SettingsResponse['avatar'] }> {
+	return request('/api/settings/avatar', {
+		method: 'PUT',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({ choice }),
 	});
 }
 

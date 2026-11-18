@@ -4,6 +4,7 @@ import { type ReminderChannel, SpaceContext } from './client/space.ts';
 import { AccountBar } from './components/AccountBar.tsx';
 import { AgendaPanel } from './components/AgendaPanel.tsx';
 import { Landing } from './components/Landing.tsx';
+import { NicknamePicker } from './components/NicknamePicker.tsx';
 import { RETURN_TO_SETTINGS_KEY, SettingsPage } from './components/SettingsPage.tsx';
 import { MemoCard } from './components/MemoCard.tsx';
 import { MemoInput } from './components/MemoInput.tsx';
@@ -227,6 +228,10 @@ function WorkspaceView({
 						완료 체크·순서 변경·지난 일 삭제를 할 수 있어요. 이름·연락처·주소·건강 정보 등 개인정보나 비밀 내용을 입력하지 마세요. 닉네임은
 						표시용일 뿐 로그인/본인 확인이 아닙니다. 알림 추천은 표시만 하며 실제 알림은 보내지 않습니다.
 					</aside>
+				)}
+
+				{personal && me.user?.needsNickname && (
+					<NicknamePicker current={me.user.displayName} firstLogin onDone={() => void onMeChanged()} />
 				)}
 
 				<UsageMeter refreshKey={usageKey} />

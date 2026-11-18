@@ -6,6 +6,8 @@ import { type AuthEnv, authorizeUrl, completeLogin, isConfigured, isProvider, PR
 import {
 	createSession,
 	deleteSession,
+	listAccounts,
+	resolveAvatar,
 	linkAccount,
 	linkedProviders,
 	loginWithProfile,
@@ -92,10 +94,18 @@ export function registerAuthRoutes(
 		const { user, workspace } = c.get('auth');
 		const providers = Object.fromEntries(PROVIDERS.map((p) => [p, { label: providerLabel(p), configured: isConfigured(p, c.env) }]));
 		if (!user) return c.json({ mode: 'guest', workspace, providers });
+		const accounts = await listAccounts(c.env.DB, user.userId);
+		const avatar = await resolveAvatar(c.env.DB, user.userId, accounts);
 		return c.json({
 			mode: 'user',
 			workspace,
-			user: { displayName: user.displayName, linked: await linkedProviders(c.env.DB, user.userId) },
+			user: {
+				displayName: user.displayName,
+				linked: accounts.map((a) => a.provider),
+				avatarUrl: avatar.url,
+				// A new account is offered nickname suggestions once (never again after a choice or skip).
+				needsNickname: user.needsNickname,
+			},
 			providers,
 		});
 	});

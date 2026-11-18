@@ -22,7 +22,7 @@ describe('migration 0016 (Google/Kakao login, e-mail reminders) keeps existing d
 				),
 			]);
 			const dump = async () => ({
-				users: (await db.prepare('SELECT * FROM users').all()).results,
+				users: (await db.prepare('SELECT id, display_name, timezone, created_at, default_lead_minutes, date_only_time, reminder_tone FROM users').all()).results,
 				prefs: (await db.prepare('SELECT * FROM notification_preferences').all()).results,
 				sources: (await db.prepare('SELECT * FROM sources ORDER BY id').all()).results,
 				memos: (await db.prepare('SELECT * FROM memos').all()).results,
@@ -33,7 +33,9 @@ describe('migration 0016 (Google/Kakao login, e-mail reminders) keeps existing d
 			const notification = await db.prepare('SELECT * FROM notifications').first();
 			await applyRest();
 			expect(await dump()).toEqual(before);
-			expect(await db.prepare('SELECT * FROM oauth_accounts').first()).toEqual({ ...account, email: null, email_verified_at: null });
+			expect(await db.prepare('SELECT * FROM oauth_accounts').first()).toEqual({ ...account, email: null, email_verified_at: null, avatar_url: null }); // avatar_url: 0017
+			// 0017: existing users keep their nickname and are never asked to pick one.
+			expect(await db.prepare('SELECT display_name, nickname_pending, avatar_provider FROM users').first()).toEqual({ display_name: '앨리스', nickname_pending: 0, avatar_provider: null });
 			expect(await db.prepare('SELECT * FROM notifications').first()).toEqual({ ...notification, channels: null }); // null = every channel that is on (today: Discord)
 			expect((await db.prepare('SELECT COUNT(*) AS n FROM notification_attempts').first<{ n: number }>())?.n).toBe(0);
 		} finally {

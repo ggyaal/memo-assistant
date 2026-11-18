@@ -87,7 +87,7 @@ const fakeFetch: typeof fetch = async (input, init) => {
 			// Google: identity comes from the signed ID token. "<id>@unverified" → email_verified false;
 			// "forged-*" → signed with an unpublished key; "wrongaud-*" → token for another app.
 			const [sub, flag] = id.split('@');
-			const claims = { sub, name: `G-${sub}`, email: `${sub}@gmail.com`, email_verified: flag !== 'unverified' };
+			const claims = { sub, name: `G-${sub}`, email: `${sub}@gmail.com`, email_verified: flag !== 'unverified', picture: `https://lh3.googleusercontent.com/a/${sub}=s96-c` };
 			let idToken = await google.idTokenFor(form, claims, clock);
 			if (sub.startsWith('forged-')) idToken = await google.sign({ ...JSON.parse(atob(idToken.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))) }, { foreignKey: true });
 			if (sub.startsWith('wrongaud-')) idToken = await google.idTokenFor(form, { ...claims, aud: 'other-app', azp: 'other-app' }, clock);
@@ -99,8 +99,15 @@ const fakeFetch: typeof fetch = async (input, init) => {
 	}
 	const auth = new Headers(init?.headers).get('authorization') ?? '';
 	const id = auth.replace('Bearer tok:', '');
-	if (url.startsWith('https://discord.com/api/users/@me')) return Response.json({ id, username: id, global_name: `D-${id}` });
-	if (url.startsWith('https://kapi.kakao.com/v2/user/me')) return Response.json({ id: Number(id), kakao_account: { profile: { nickname: `K-${id}` } } });
+	if (url.startsWith('https://discord.com/api/users/@me')) return Response.json({ id, username: id, global_name: `D-${id}`, avatar: id === 'pic' ? 'a'.repeat(32) : null });
+	// Kakao: ids starting with 9 declined both optional consents (no nickname, no picture).
+	if (url.startsWith('https://kapi.kakao.com/v2/user/me')) {
+		if (id.startsWith('9')) return Response.json({ id: Number(id), kakao_account: { profile_nickname_needs_agreement: true, profile_image_needs_agreement: true } });
+		return Response.json({
+			id: Number(id),
+			kakao_account: { profile: { nickname: `K-${id}`, profile_image_url: `http://k.kakaocdn.net/dn/${id}/img_640x640.jpg`, is_default_image: false } },
+		});
+	}
 	return new Response('unexpected', { status: 500 });
 };
 
@@ -132,9 +139,9 @@ const runAgent: RunMemoAgent = async (job: MemoJob) => {
 
 type Jar = Map<string, string>;
 
-function makeApp(envOverride: Partial<ApiBindings> = {}) {
+function makeApp(envOverride: Partial<ApiBindings> = {}, extra: Partial<import('../src/server/routes.ts').ApiDeps> = {}) {
 	const app = new Hono<{ Bindings: ApiBindings }>();
-	app.route('/api', createApi({ runAgent, now: () => clock, fetchFn: fakeFetch }));
+	app.route('/api', createApi({ runAgent, now: () => clock, fetchFn: fakeFetch, ...extra }));
 	return async (path: string, init: RequestInit & { jar?: Jar } = {}) => {
 		const headers = new Headers(init.headers);
 		if (init.jar?.size) headers.set('cookie', [...init.jar].map(([k, v]) => `${k}=${v}`).join('; '));
@@ -240,7 +247,10 @@ describe('OAuth login (state + PKCE)', () => {
 		expect(cookie).toMatch(/Path=\//);
 		expect(cookie).not.toMatch(/Domain=/);
 		const info = await me(send, jar);
-		expect(info).toMatchObject({ mode: 'user', user: { displayName: 'D-alice', linked: ['discord'] }, workspace: { kind: 'personal', name: 'D-alice님의 메모' } });
+		// The app nickname is not the social name: a random starter name, with the one-time suggestion step pending.
+		expect(info).toMatchObject({ mode: 'user', user: { linked: ['discord'], needsNickname: true }, workspace: { kind: 'personal' } });
+		expect(info.user?.displayName).not.toBe('D-alice');
+		expect(info.workspace.name).toBe(`${info.user?.displayName}님의 메모`);
 		// The raw session token is never stored.
 		const stored = await db.prepare('SELECT id FROM sessions').first<{ id: string }>();
 		expect(stored?.id).toBe(await sha256Hex(jar.get('__Host-memo_session')!));
@@ -343,7 +353,7 @@ describe('personal workspace isolation', () => {
 		const a = (await login(send, 'discord', 'alice')).jar;
 		await postMemo(send, '내일 공용으로 몰래 넣기', a, { workspaceId: 'ws_shared_guest', workspace_id: 'ws_shared_guest' });
 		expect((await titles(send)).length).toBe(0); // nothing landed in the shared space
-		expect((await titles(send, a)).map((m) => m.nickname)).toEqual(['D-alice']); // author = account, not "손님"
+		expect((await titles(send, a)).map((m) => m.nickname)).toEqual([(await me(send, a)).user?.displayName]); // author = account, not "손님"
 	});
 
 	it('personal memos may contain contact details (only the owner sees them); the shared space still blocks them', async () => {
@@ -438,7 +448,8 @@ describe('settings (profile, linked accounts, notification channels)', () => {
 		const send = makeApp();
 		const jar = (await login(send, 'discord', 'alice')).jar;
 		const s = (await (await settings(send, jar)).json()) as Settings;
-		expect(s).toMatchObject({ displayName: 'D-alice', timezone: 'Asia/Seoul', linked: ['discord'] });
+		expect(s).toMatchObject({ timezone: 'Asia/Seoul', linked: ['discord'], avatar: { choice: null, url: null } });
+		expect(s.displayName).toBe((await me(send, jar)).user?.displayName);
 		expect(s.notifications.map((n) => [n.channel, n.available, n.enabled, n.delivering])).toEqual([
 			['discord', true, false, false],
 			['kakao', false, false, false],
@@ -1267,7 +1278,8 @@ describe('Google / Kakao login', () => {
 		const { jar, location } = await login(send, 'google', 'gwen');
 		expect(location).toBe('/');
 		const first = await me(send, jar);
-		expect(first).toMatchObject({ mode: 'user', workspace: { kind: 'personal' }, user: { displayName: 'G-gwen', linked: ['google'] } });
+		expect(first).toMatchObject({ mode: 'user', workspace: { kind: 'personal' }, user: { linked: ['google'], needsNickname: true } });
+		expect(first.user?.displayName).not.toBe('G-gwen'); // the social name is kept apart from the app nickname
 		expect(await accountRow('google', 'gwen')).toMatchObject({ email: 'gwen@gmail.com' });
 		expect((await accountRow('google', 'gwen'))?.email_verified_at).toBeTruthy();
 		// Reload = same cookie → same user and space.
@@ -1303,7 +1315,8 @@ describe('Google / Kakao login', () => {
 		const url = new URL(start.headers.get('location')!);
 		expect(url.origin + url.pathname).toBe('https://kauth.kakao.com/oauth/authorize');
 		expect(url.searchParams.get('client_id')).toBe('kakao-rest');
-		expect(url.searchParams.get('scope')).toBe('profile_nickname');
+		// Exactly the console's (optional) consent items; never account_email / talk_message / openid.
+		expect(url.searchParams.get('scope')).toBe('profile_nickname,profile_image');
 		expect(url.searchParams.has('code_challenge')).toBe(false);
 		expect(url.searchParams.get('state')).toBeTruthy();
 
@@ -1311,7 +1324,7 @@ describe('Google / Kakao login', () => {
 		const token = tokenRequests.at(-1)!;
 		expect([token.get('client_id'), token.get('client_secret'), token.has('code_verifier')]).toEqual(['kakao-rest', 'kakao-secret', false]);
 		const kakaoMe = await me(send, k);
-		expect(kakaoMe).toMatchObject({ mode: 'user', user: { displayName: 'K-123456789', linked: ['kakao'] } });
+		expect(kakaoMe).toMatchObject({ mode: 'user', user: { linked: ['kakao'], needsNickname: true } });
 		const g = (await login(send, 'google', 'gwen')).jar;
 		expect((await me(send, g)).workspace.id).not.toBe(kakaoMe.workspace.id);
 		// Reload and logout.
@@ -1576,5 +1589,206 @@ describe('e-mail reminders', () => {
 		clock = new Date('2026-11-16T05:30:05Z');
 		const AI = { run: () => { throw new Error('AI must not be called while sending'); } };
 		expect(await run({ ...MAIL, AI })).toMatchObject({ sent: 1 });
+	});
+});
+
+// ---- Kakao optional consents, profile pictures, AI nickname suggestions (2026-11-19) ---------
+describe('Kakao optional consents and profile pictures', () => {
+	const KAKAO = { KAKAO_REST_API_KEY: 'kakao-rest' };
+	const json = { 'content-type': 'application/json' };
+	const settingsOf = async (send: Send, jar: Jar) => (await (await send('/api/settings', { jar })).json()) as import('../src/shared/types.ts').SettingsResponse;
+
+	it('declining both optional consents still signs in (id only); default image; no e-mail needed', async () => {
+		const send = makeApp(KAKAO);
+		const { jar, location } = await login(send, 'kakao', '900100');
+		expect(location).toBe('/');
+		const info = (await (await send('/api/me', { jar })).json()) as { mode: string; user: { avatarUrl: string | null; displayName: string } };
+		expect(info.mode).toBe('user');
+		expect(info.user.avatarUrl).toBeNull();
+		expect(info.user.displayName.length).toBeGreaterThanOrEqual(2);
+		const row = await db.prepare("SELECT display_name, email, avatar_url FROM oauth_accounts WHERE provider = 'kakao'").first();
+		expect(row).toEqual({ display_name: '카카오 사용자', email: null, avatar_url: null });
+		// Same Kakao id later = same user (identity is the member id, not the nickname).
+		const again = (await login(send, 'kakao', '900100')).jar;
+		expect((await me(send, again)).workspace.id).toBe((await me(send, jar)).workspace.id);
+	});
+
+	it('Kakao picture (http upgraded to https), Google picture; the person chooses which one or the default image', async () => {
+		const send = makeApp(KAKAO);
+		const jar = (await login(send, 'kakao', '4242')).jar;
+		expect((await (await send('/api/me', { jar })).json() as { user: { avatarUrl: string } }).user.avatarUrl).toBe('https://k.kakaocdn.net/dn/4242/img_640x640.jpg');
+		await login(send, 'google', 'pics', jar, true);
+		let s = await settingsOf(send, jar);
+		expect(s.accounts.map((a) => [a.provider, a.avatarUrl])).toEqual([
+			['kakao', 'https://k.kakaocdn.net/dn/4242/img_640x640.jpg'],
+			['google', 'https://lh3.googleusercontent.com/a/pics=s96-c'],
+		]);
+		const choose = (choice: unknown, headers: Record<string, string> = {}) =>
+			send('/api/settings/avatar', { method: 'PUT', jar, headers: { ...json, ...headers }, body: JSON.stringify({ choice }) });
+		expect((await choose('google')).status).toBe(200);
+		expect((await settingsOf(send, jar)).avatar).toEqual({ choice: 'google', url: 'https://lh3.googleusercontent.com/a/pics=s96-c' });
+		expect((await choose('none')).status).toBe(200);
+		s = await settingsOf(send, jar);
+		expect(s.avatar).toEqual({ choice: 'none', url: null });
+		expect((await choose('discord')).status).toBe(422); // no such picture
+		expect((await choose('https://evil.example/x.png')).status).toBe(400);
+		expect((await choose('google', { origin: 'https://evil.example' })).status).toBe(403);
+		expect((await send('/api/settings/avatar', { method: 'PUT', headers: json, body: '{"choice":null}' })).status).toBe(401);
+	});
+
+	it('only allow-listed https picture hosts are ever stored', async () => {
+		const { safeAvatarUrl } = await import('../src/server/auth/providers.ts');
+		expect(safeAvatarUrl('https://cdn.discordapp.com/avatars/1/abc.png')).toBe('https://cdn.discordapp.com/avatars/1/abc.png');
+		for (const bad of ['javascript:alert(1)', 'https://evil.example/a.png', 'http://lh3.googleusercontent.com/a', 'https://kakaocdn.net.evil.example/x', 'https://u:p@cdn.discordapp.com/x', 42]) {
+			expect(safeAvatarUrl(bad)).toBeNull();
+		}
+	});
+});
+
+describe('AI nickname suggestions (new accounts; Google, Discord and Kakao alike)', () => {
+	const json = { 'content-type': 'application/json' };
+	const KAKAO = { KAKAO_REST_API_KEY: 'kakao-rest' };
+	/** Fake model: records each prompt (to prove no personal data is sent) and answers as told. */
+	function fakeAi(answer: (n: number) => string | Error = () => '["달빛을 모으는 수달","메모하는 작은 여우","생각이 많은 문어"]') {
+		const prompts: string[] = [];
+		const generate: import('../src/server/nickname-ai.ts').NicknameGenerator = async (theme) => {
+			const { NICKNAME_PROMPT } = await import('../src/server/nickname-ai.ts');
+			prompts.push(NICKNAME_PROMPT(theme));
+			const a = answer(prompts.length);
+			if (a instanceof Error) throw a;
+			const { parseAiNicknames } = await import('../src/shared/nickname.ts');
+			return { names: parseAiNicknames(a), usage: { input: 120, output: 40 } };
+		};
+		return { prompts, generate };
+	}
+	const suggest = async (send: Send, jar?: Jar, headers: Record<string, string> = {}) => {
+		const res = await send('/api/profile/nickname-suggestions', { method: 'POST', jar, headers });
+		return { status: res.status, body: (await res.json()) as { suggestions: { name: string; emoji: string }[]; source: string } };
+	};
+	const meOf = async (send: Send, jar: Jar) => (await (await send('/api/me', { jar })).json()) as { user: { displayName: string; needsNickname: boolean }; workspace: { id: string; name: string } };
+
+	it.each([['discord', 'nina'], ['google', 'nina-g'], ['kakao', '31337']] as const)(
+		'%s: a new account gets a random name at once (no AI), then 3 AI suggestions from ONE call; choosing saves it; never asked again',
+		async (provider, subject) => {
+			const ai = fakeAi();
+			const send = makeApp(KAKAO, { nicknames: ai.generate });
+			const { jar } = await login(send, provider, subject);
+			expect(ai.prompts).toHaveLength(0); // sign-up itself never calls AI
+			const first = await meOf(send, jar);
+			expect(first.user.needsNickname).toBe(true);
+			const r = await suggest(send, jar);
+			expect(r.status).toBe(200);
+			expect(r.body).toEqual({
+				source: 'ai',
+				suggestions: [
+					{ name: '달빛을 모으는 수달', emoji: '🦦' },
+					{ name: '메모하는 작은 여우', emoji: '🦊' },
+					{ name: '생각이 많은 문어', emoji: '🐙' },
+				],
+			});
+			expect(ai.prompts).toHaveLength(1);
+			// No personal data in the prompt: no social name, id or e-mail.
+			for (const secret of [subject, `D-${subject}`, `G-${subject}`, `K-${subject}`, '@gmail.com']) expect(ai.prompts[0]).not.toContain(secret);
+			const put = await send('/api/profile/nickname', { method: 'PUT', jar, headers: json, body: JSON.stringify({ displayName: '메모하는 작은 여우' }) });
+			expect(put.status).toBe(200);
+			const after = await meOf(send, jar);
+			expect(after.user).toMatchObject({ displayName: '메모하는 작은 여우', needsNickname: false });
+			expect(after.workspace.name).toBe('메모하는 작은 여우님의 메모');
+			// Sign in again: same name, no step, no AI.
+			const again = (await login(send, provider, subject)).jar;
+			expect((await meOf(send, again)).user).toMatchObject({ displayName: '메모하는 작은 여우', needsNickname: false });
+			expect(ai.prompts).toHaveLength(1);
+		},
+	);
+
+	it('"다시 추천" is the only extra AI call; AI failure or bad output → three fallback names (sign-up unaffected)', async () => {
+		const ai = fakeAi((n) => (n === 1 ? '["고양이 🐱 짱","https://x.y","시발 여우"]' : n === 2 ? new Error('model down') : 'not json at all'));
+		const send = makeApp({}, { nicknames: ai.generate });
+		const { jar } = await login(send, 'discord', 'retry');
+		for (let i = 0; i < 3; i++) {
+			const r = await suggest(send, jar);
+			expect(r.status).toBe(200);
+			expect(r.body.source).toBe('fallback');
+			expect(r.body.suggestions).toHaveLength(3);
+			expect(new Set(r.body.suggestions.map((s) => s.name)).size).toBe(3);
+		}
+		expect(ai.prompts).toHaveLength(3);
+		expect((await meOf(send, jar)).user.needsNickname).toBe(true); // nothing chosen yet
+	});
+
+	it('partly valid AI output is topped up to three; no AI configured → fallback without any call', async () => {
+		const ai = fakeAi(() => '```json\n["산책하는 수줍은 펭귄", "123", "산책하는 수줍은 펭귄"]\n```');
+		const send = makeApp({}, { nicknames: ai.generate });
+		const { jar } = await login(send, 'discord', 'part');
+		const r = await suggest(send, jar);
+		expect(r.body.source).toBe('ai');
+		expect(r.body.suggestions[0]).toEqual({ name: '산책하는 수줍은 펭귄', emoji: '🐧' });
+		expect(r.body.suggestions).toHaveLength(3);
+		const none = makeApp({}, { nicknames: null });
+		const j2 = (await login(none, 'discord', 'noai')).jar;
+		expect((await suggest(none, j2)).body.source).toBe('fallback');
+	});
+
+	it('per-user daily cap and the app AI budget: past them, fallback names (no AI call)', async () => {
+		const ai = fakeAi();
+		const send = makeApp({}, { nicknames: ai.generate });
+		const { jar } = await login(send, 'discord', 'greedy');
+		const { NICKNAME_AI_PER_DAY } = await import('../src/server/routes.ts');
+		for (let i = 0; i < NICKNAME_AI_PER_DAY + 2; i++) await suggest(send, jar);
+		expect(ai.prompts).toHaveLength(NICKNAME_AI_PER_DAY);
+		const ai2 = fakeAi();
+		const tight = makeApp({ DAILY_AI_NEURONS: '4' }, { nicknames: ai2.generate });
+		const j2 = (await login(tight, 'discord', 'budget')).jar;
+		expect((await suggest(tight, j2)).body.source).toBe('fallback');
+		expect(ai2.prompts).toHaveLength(0);
+	});
+
+	it('measured usage is recorded apart from memo organizing and shown in /api/usage', async () => {
+		const ai = fakeAi();
+		const send = makeApp({}, { nicknames: ai.generate });
+		const { jar } = await login(send, 'discord', 'meter');
+		await suggest(send, jar);
+		const usage = (await (await send('/api/usage')).json()) as { today: { actualNeurons: number; nicknameNeurons: number; used: number } };
+		// 120 in × 5.5/1000 + 40 out × 36.4/1000 = 2.116 Neurons
+		expect(usage.today.nicknameNeurons).toBe(2.1);
+		expect(usage.today.actualNeurons).toBe(0);
+		expect(usage.today.used).toBe(1); // counted in the shared daily AI request limit
+	});
+
+	it('"건너뛰기" keeps the random starter name; typed names are checked; other users / guests / other sites are refused', async () => {
+		const send = makeApp({}, { nicknames: null });
+		const { jar } = await login(send, 'discord', 'skipper');
+		const start = (await meOf(send, jar)).user.displayName;
+		expect((await send('/api/profile/nickname/skip', { method: 'POST', jar })).status).toBe(200);
+		expect((await meOf(send, jar)).user).toEqual(expect.objectContaining({ displayName: start, needsNickname: false }));
+		const put = (name: string, headers: Record<string, string> = {}, j: Jar | null = jar) =>
+			send('/api/profile/nickname', { method: 'PUT', jar: j ?? undefined, headers: { ...json, ...headers }, body: JSON.stringify({ displayName: name }) });
+		expect((await put('가')).status).toBe(422);
+		expect((await put('010-1234-5678')).status).toBe(422);
+		expect((await put('씨발 여우')).status).toBe(422);
+		expect((await put('x'.repeat(21))).status).toBe(400);
+		expect((await put('좋은 이름', { origin: 'https://evil.example' })).status).toBe(403);
+		expect((await put('좋은 이름', {}, null)).status).toBe(401);
+		expect((await suggest(send)).status).toBe(401);
+		expect((await suggest(send, jar, { origin: 'https://evil.example' })).status).toBe(403);
+	});
+
+	it('renaming keeps memos, reminders and ownership; linking another account keeps the nickname', async () => {
+		const send = makeApp({}, { nicknames: null });
+		const { jar } = await login(send, 'discord', 'owner2');
+		await postMemo(send, '내일 오후 3시 회의', jar);
+		const before = await titles(send, jar);
+		await send('/api/profile/nickname', { method: 'PUT', jar, headers: json, body: JSON.stringify({ displayName: '새 이름 수달' }) });
+		const after = await titles(send, jar);
+		expect(after.map((m) => [m.id, m.title])).toEqual(before.map((m) => [m.id, m.title]));
+		expect(after[0].nickname).toBe('새 이름 수달');
+		await login(send, 'google', 'owner2-g', jar, true);
+		expect((await meOf(send, jar)).user.displayName).toBe('새 이름 수달');
+		// The Google login now opens the same user and memos, with the app nickname (not "G-owner2-g").
+		const viaGoogle = (await login(send, 'google', 'owner2-g')).jar;
+		expect((await meOf(send, viaGoogle)).user.displayName).toBe('새 이름 수달');
+		expect((await titles(send, viaGoogle)).map((m) => m.id)).toEqual(before.map((m) => m.id));
+		// The guest space never gets a nickname step.
+		expect(((await (await send('/api/me')).json()) as { mode: string; user?: unknown }).user).toBeUndefined();
 	});
 });

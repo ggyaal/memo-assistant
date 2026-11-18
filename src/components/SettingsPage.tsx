@@ -7,11 +7,14 @@ import {
 	sendTonePreview,
 	setNotificationChannel,
 	unlinkAccount,
+	updateAvatar,
 	updateDisplayName,
 	updateReminderTone,
 	updateReminderDefaults,
 } from '../client/api.ts';
 import { PROVIDER_ORDER, ProviderIcon } from './ProviderIcon.tsx';
+import { Avatar } from './Avatar.tsx';
+import { NicknamePicker } from './NicknamePicker.tsx';
 import { reminderCard, sampleTiming, toneMessage } from '../shared/discord-card.ts';
 import { LIMITS, REMINDER_TONE_LABELS, REMINDER_TONES, type ChannelStatus, type ReminderTone, type SettingsResponse } from '../shared/types.ts';
 
@@ -24,6 +27,7 @@ export function SettingsPage({ me, onBack, onProfileChanged }: { me: MeResponse;
 	const [name, setName] = useState('');
 	const [nameStatus, setNameStatus] = useState<{ text: string; error: boolean } | null>(null);
 	const [savingName, setSavingName] = useState(false);
+	const [suggesting, setSuggesting] = useState(false);
 	const [channelBusy, setChannelBusy] = useState<string | null>(null);
 	const [channelError, setChannelError] = useState<Record<string, string>>({});
 	const [lead, setLead] = useState(30);
@@ -166,6 +170,14 @@ export function SettingsPage({ me, onBack, onProfileChanged }: { me: MeResponse;
 				<>
 					<form className="card settings__section" onSubmit={saveName} aria-labelledby="settings-profile">
 						<h3 id="settings-profile">프로필</h3>
+						<AvatarChooser
+							me={me}
+							settings={settings}
+							onChanged={(avatar) => {
+								setSettings((s) => (s ? { ...s, avatar } : s));
+								onProfileChanged();
+							}}
+						/>
 						<label htmlFor="display-name" className="label">
 							닉네임
 						</label>
@@ -185,7 +197,26 @@ export function SettingsPage({ me, onBack, onProfileChanged }: { me: MeResponse;
 								저장
 							</button>
 						</div>
-						<p className="muted small">개인 공간 이름과 내 메모의 작성자 이름으로 쓰여요. 소셜 계정의 이름은 바뀌지 않아요.</p>
+						<p className="muted small">
+							개인 공간 이름과 내 메모의 작성자 이름으로 쓰여요. 소셜 계정의 이름과는 따로이고, 바꿔도 내 메모·일정은 그대로 내 것이에요.
+						</p>
+						{!suggesting ? (
+							<button type="button" className="link-button small" onClick={() => setSuggesting(true)}>
+								✨ AI 닉네임 추천 받기
+							</button>
+						) : (
+							<NicknamePicker
+								current={settings.displayName}
+								firstLogin={false}
+								onDone={(displayName) => {
+									setName(displayName);
+									setSettings((s) => (s ? { ...s, displayName } : s));
+									setSuggesting(false);
+									setNameStatus({ text: '닉네임을 바꿨어요.', error: false });
+									onProfileChanged();
+								}}
+							/>
+						)}
 						{nameStatus && (
 							<p className={nameStatus.error ? 'error small' : 'muted small'} role="status">
 								{nameStatus.text}
@@ -297,6 +328,53 @@ export function SettingsPage({ me, onBack, onProfileChanged }: { me: MeResponse;
 				</>
 			)}
 		</section>
+	);
+}
+
+/** Profile picture: automatic, a linked account's picture, or the default image. */
+function AvatarChooser({
+	me,
+	settings,
+	onChanged,
+}: {
+	me: MeResponse;
+	settings: SettingsResponse;
+	onChanged: (avatar: SettingsResponse['avatar']) => void;
+}) {
+	const [busy, setBusy] = useState(false);
+	const [error, setError] = useState<string | null>(null);
+	const withPicture = settings.accounts.filter((a) => a.avatarUrl);
+	const value = settings.avatar.choice ?? 'auto';
+	async function choose(next: string) {
+		setBusy(true);
+		setError(null);
+		try {
+			const { avatar } = await updateAvatar(next === 'auto' ? null : (next as SettingsResponse['avatar']['choice']));
+			onChanged(avatar);
+		} catch (e) {
+			setError(e instanceof ApiRequestError ? e.message : '바꾸지 못했어요.');
+		} finally {
+			setBusy(false);
+		}
+	}
+	return (
+		<div className="settings__avatar">
+			<Avatar url={settings.avatar.url} size={56} />
+			<label className="settings__field small">
+				프로필 사진{' '}
+				<select value={value} disabled={busy} onChange={(e) => void choose(e.target.value)}>
+					<option value="auto">자동 (연결한 계정 사진)</option>
+					{withPicture.map((a) => (
+						<option key={a.provider} value={a.provider}>
+							{me.providers[a.provider].label} 사진
+						</option>
+					))}
+					<option value="none">기본 이미지</option>
+				</select>
+			</label>
+			{withPicture.length === 0 && <span className="muted small">연결한 계정에 사진이 없거나 제공에 동의하지 않아 기본 이미지를 써요.</span>}
+			{error && <span className="error small">{error}</span>}
+		</div>
 	);
 }
 
