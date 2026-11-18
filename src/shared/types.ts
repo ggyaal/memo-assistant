@@ -45,7 +45,8 @@ export interface Memo {
 	/** When the memo was checked as done (UTC ISO 8601); null = not done. Shared by all visitors. */
 	completed_at: string | null;
 	/** Discord reminder the owner confirmed (personal spaces only); null if none. */
-	reminder: { at: string; status: ReminderStatus; error: string | null } | null;
+	/** channels: where it goes; null = every channel switched on at send time. */
+	reminder: { at: string; status: ReminderStatus; error: string | null; channels?: ('discord' | 'email')[] | null } | null;
 	/** Repeat / several-days rule (due_at/due_date = first occurrence); null = one-time. */
 	recurrence: Recurrence | null;
 	/** Unclear wording: the person picks "every week" or "just these days". */
@@ -109,7 +110,7 @@ export interface ReminderRequest {
 	time?: string;
 	/** Any reminder time the person picked (ISO 8601 with offset, e.g. "2026-11-16T14:30:00+09:00"). */
 	at?: string;
-	/** Where to send it. Only channels that can deliver are accepted (today: discord). */
+	/** Where to send it. Only channels switched on in settings are accepted (discord, email; never kakao). */
 	channels?: NotificationChannel[];
 }
 
@@ -146,12 +147,20 @@ export interface ChannelStatus {
 	note: string;
 	/** Discord only: the user must join the bot's server first. joined null = could not check. */
 	server?: { joined: boolean | null; inviteUrl: string | null };
+	/** E-mail only: verified Google address reminders go to. */
+	address?: string | null;
+	/** E-mail only: latest failed attempt in the last 7 days. */
+	lastFailure?: { at: string; code: string; message: string } | null;
 }
 
 export interface SettingsResponse {
 	displayName: string;
 	timezone: string;
 	linked: ('google' | 'discord' | 'kakao')[];
+	/** Linked login methods; `email` is a provider-verified address (Google), shown to the owner only. */
+	accounts: { provider: 'google' | 'discord' | 'kakao'; displayName: string | null; email: string | null; linkedAt: string }[];
+	/** Linking/unlinking needs a sign-in within the last 10 minutes. */
+	accountChanges: { allowed: boolean; until: string | null };
 	notifications: ChannelStatus[];
 	reminderDefaults: { leadMinutes: number; dateOnlyTime: string | null };
 	/** Discord reminder wording (fixed templates). */
@@ -184,6 +193,8 @@ export type ApiErrorCode =
 	| 'not_found'
 	| 'login_required'
 	| 'channel_unavailable'
+	| 'reauth_required'
+	| 'last_login_method'
 	| 'channel_off'
 	| 'no_deadline'
 	| 'past_time'

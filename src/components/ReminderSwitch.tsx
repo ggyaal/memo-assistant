@@ -4,7 +4,7 @@ import { formatKst } from '../client/format.ts';
 import type { Memo } from '../shared/types.ts';
 
 /**
- * On/off for one memo's Discord reminder in the upcoming-reminders panel.
+ * On/off for one memo's reminder (all chosen channels) in the upcoming-reminders panel.
  * Recommended memos are switched on automatically; turning one off is remembered.
  * Turning on uses the user's defaults; a date-only memo without a default time asks for one.
  */
@@ -49,7 +49,7 @@ export function ReminderSwitch({ memo, onChanged }: { memo: Memo; onChanged: () 
 					className="switch switch--small"
 					checked={on}
 					disabled={busy}
-					aria-label={`${memo.title} Discord 알림 ${on ? '끄기' : '켜기'}`}
+					aria-label={`${memo.title} 알림 ${on ? '끄기' : '켜기'}`}
 					onChange={(e) => {
 						const next = e.target.checked;
 						void run(() => (next ? scheduleReminder(memo.id, {}) : cancelReminder(memo.id)), next);

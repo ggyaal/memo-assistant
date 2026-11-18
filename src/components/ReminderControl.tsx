@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { ApiRequestError, cancelReminder, scheduleReminder } from '../client/api.ts';
 import { formatKst, fromKstInput, toKstInput } from '../client/format.ts';
-import { useSpace } from '../client/space.ts';
+import { CHANNEL_LABELS, channelNames, type ReminderChannel, useSpace } from '../client/space.ts';
 import { earliestReminderTime, REMINDER_MIN_LEAD_MINUTES, type Memo } from '../shared/types.ts';
 
 /** Quick picks that only fill in the date/time box (the box is what gets saved). */
@@ -18,12 +18,53 @@ const FAILURES: Record<string, string> = {
 	unknown_outcome: '전송 결과를 확인하지 못했어요(중복 방지를 위해 다시 보내지 않음)',
 	bot_unauthorized: '알림 봇 설정 문제',
 	bot_not_configured: '알림 봇이 설정되지 않았어요',
-	channel_off: 'Discord 알림이 꺼져 있었어요',
+	channel_off: '알림 경로가 꺼져 있었어요',
+	'email:email_not_configured': '메일 발신 서비스가 아직 설정되지 않았어요',
+	'email:no_verified_email': '인증된 Google 이메일이 없어요',
+	'email:email_daily_limit': '오늘 보낼 수 있는 메일 수를 넘었어요',
+	'email:email_unauthorized': '메일 발신 설정 문제',
 };
 
 function failureText(error: string | null): string {
 	if (!error) return '보내지 못했어요';
-	return FAILURES[error] ?? `보내지 못했어요 (${error})`;
+	// Several channels can fail at once ("50007,email:email_daily_limit").
+	return error
+		.split(',')
+		.map((code) => FAILURES[code] ?? `보내지 못했어요 (${code})`)
+		.join(' · ');
+}
+
+/** Which channels to use for this reminder: every channel switched on in settings can be picked. */
+function ChannelPicker({ picked, onChange }: { picked: ReminderChannel[]; onChange: (next: ReminderChannel[]) => void }) {
+	const { channels } = useSpace();
+	const toggle = (ch: ReminderChannel, on: boolean) => onChange(on ? [...new Set([...picked, ch])] : picked.filter((c) => c !== ch));
+	return (
+		<fieldset className="reminder__channels">
+			<legend>알림 받을 곳</legend>
+			{(['discord', 'email'] as const).map((ch) => {
+				const ready = channels.includes(ch);
+				return (
+					<label key={ch} className={`reminder__channel${ready ? '' : ' is-unavailable'}`} title={ready ? undefined : '설정에서 먼저 켜 주세요'}>
+						<input
+							type="checkbox"
+							role="switch"
+							className="switch switch--small"
+							checked={ready && picked.includes(ch)}
+							disabled={!ready}
+							onChange={(e) => toggle(ch, e.target.checked)}
+						/>
+						{CHANNEL_LABELS[ch]}
+						{!ready && <span className="muted"> (설정에서 켜기)</span>}
+					</label>
+				);
+			})}
+			<label className="reminder__channel is-unavailable" title="제공하지 않아요">
+				<input type="checkbox" role="switch" className="switch switch--small" checked={false} disabled />
+				카카오톡 <span className="muted">(제공 안 함)</span>
+			</label>
+			{channels.length === 0 && <p className="muted">⚙️ 설정에서 Discord 또는 이메일 알림을 먼저 켜 주세요.</p>}
+		</fieldset>
+	);
 }
 
 /** Why a picked time cannot be used (same rule as the server), or null. */
@@ -36,15 +77,15 @@ function timeProblem(value: string, now: Date): string | null {
 }
 
 /**
- * Reminder for one personal memo: where to send it (Discord; KakaoTalk and Gmail
- * are not ready yet) and one date/time box. "30분 전 / 10분 전 / 정시" only fill
+ * Reminder for one personal memo: where to send it (Discord DM and/or e-mail, whichever is on;
+ * KakaoTalk is not offered) and one date/time box. "30분 전 / 10분 전 / 정시" only fill
  * the box from the memo's time; any time 4+ minutes from now can be saved.
  */
 export function ReminderControl({ memo, onChanged }: { memo: Memo; onChanged: () => void }) {
-	const { shared, discordReady } = useSpace();
+	const { shared, channels } = useSpace();
 	const [open, setOpen] = useState(false);
 	const [value, setValue] = useState('');
-	const [discord, setDiscord] = useState(true);
+	const [picked, setPicked] = useState<ReminderChannel[]>(channels);
 	const [busy, setBusy] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 
@@ -58,7 +99,8 @@ export function ReminderControl({ memo, onChanged }: { memo: Memo; onChanged: ()
 		// Start from the existing reminder, else "30분 전" (or the memo time) when still possible; never an invented time.
 		const candidates = [initial, presetValue(30), presetValue(0)].filter((v): v is string => !!v);
 		setValue(candidates.find((v) => !timeProblem(v, new Date())) ?? '');
-		setDiscord(discordReady);
+		const current = memo.reminder?.channels;
+		setPicked(current ? channels.filter((c) => current.includes(c)) : channels);
 		setError(null);
 		setOpen(true);
 	}
@@ -79,14 +121,16 @@ export function ReminderControl({ memo, onChanged }: { memo: Memo; onChanged: ()
 
 	const r = memo.reminder;
 	const scheduled = r && (r.status === 'scheduled' || r.status === 'sending');
+	// Where it goes: the channels chosen for it, else every channel that is on.
+	const via = channelNames(r?.channels ?? channels) || '알림';
 
 	if (!open) {
 		if (scheduled) {
 			return (
 				<p className="reminder reminder--scheduled small">
-					🔔 {memo.recurrence ? '매 회차 Discord DM · 다음 ' : ''}
+					🔔 {memo.recurrence ? `매 회차 ${via} · 다음 ` : ''}
 					<strong>{formatKst(r.at)}</strong>
-					{memo.recurrence ? '' : '에 Discord DM 예약됨'}
+					{memo.recurrence ? '' : `에 ${via} 예약됨`}
 					<button type="button" className="link-button" disabled={busy || r.status === 'sending'} onClick={() => openForm(toKstInput(new Date(r.at)))}>
 						변경
 					</button>
@@ -99,7 +143,7 @@ export function ReminderControl({ memo, onChanged }: { memo: Memo; onChanged: ()
 		}
 		return (
 			<div className="reminder small">
-				{r?.status === 'sent' && <p className="muted">✅ {formatKst(r.at)}에 Discord로 알림을 보냈어요.</p>}
+				{r?.status === 'sent' && <p className="muted">✅ {formatKst(r.at)}에 {via}(으)로 알림을 보냈어요(발송 요청 접수 기준).</p>}
 				{r?.status === 'failed' && <p className="error">⚠️ 지난 알림 실패: {failureText(r.error)}</p>}
 				<button type="button" className="link-button" onClick={() => openForm()}>
 					🔔 {r?.status === 'sent' ? '알림 다시 받기' : '알림 받기'}
@@ -116,31 +160,18 @@ export function ReminderControl({ memo, onChanged }: { memo: Memo; onChanged: ()
 				error={error}
 				scheduled={!!scheduled}
 				onSave={(body) => void run(() => scheduleReminder(memo.id, body))}
+				initialChannels={memo.reminder?.channels ?? null}
 				onClose={() => setOpen(false)}
 			/>
 		);
 	}
 
 	const problem = timeProblem(value, now);
-	const noChannel = !discord;
+	const chosen = picked.filter((c) => channels.includes(c));
+	const noChannel = chosen.length === 0;
 	return (
 		<div className="reminder reminder__form small">
-			<fieldset className="reminder__channels">
-				<legend>알림 받을 곳</legend>
-				<label className="reminder__channel">
-					<input type="checkbox" role="switch" className="switch switch--small" checked={discord && discordReady} disabled={!discordReady} onChange={(e) => setDiscord(e.target.checked)} />
-					Discord
-				</label>
-				<label className="reminder__channel is-unavailable" title="아직 준비 중이에요">
-					<input type="checkbox" role="switch" className="switch switch--small" checked={false} disabled />
-					카카오톡 <span className="muted">(준비 중)</span>
-				</label>
-				<label className="reminder__channel is-unavailable" title="아직 준비 중이에요">
-					<input type="checkbox" role="switch" className="switch switch--small" checked={false} disabled />
-					Gmail <span className="muted">(준비 중)</span>
-				</label>
-				{!discordReady && <p className="muted">⚙️ 설정에서 Discord 알림을 먼저 켜 주세요.</p>}
-			</fieldset>
+			<ChannelPicker picked={picked} onChange={setPicked} />
 
 			<label className="reminder__when">
 				알림 날짜·시각
@@ -172,8 +203,8 @@ export function ReminderControl({ memo, onChanged }: { memo: Memo; onChanged: ()
 				<button
 					type="button"
 					className="primary small"
-					disabled={busy || !!problem || noChannel || !discordReady}
-					onClick={() => void run(() => scheduleReminder(memo.id, { at: fromKstInput(value), channels: ['discord'] }))}
+					disabled={busy || !!problem || noChannel}
+					onClick={() => void run(() => scheduleReminder(memo.id, { at: fromKstInput(value), channels: chosen }))}
 				>
 					{scheduled ? '변경' : '예약'}
 				</button>
@@ -201,20 +232,25 @@ function RepeatingReminderForm({
 	scheduled,
 	onSave,
 	onClose,
+	initialChannels,
 }: {
 	memo: Memo;
 	busy: boolean;
 	error: string | null;
 	scheduled: boolean;
-	onSave: (body: { leadMinutes: number } | { time: string }) => void;
+	onSave: (body: ({ leadMinutes: number } | { time: string }) & { channels: ReminderChannel[] }) => void;
 	onClose: () => void;
+	initialChannels: ReminderChannel[] | null;
 }) {
-	const { discordReady } = useSpace();
+	const { channels } = useSpace();
+	const [picked, setPicked] = useState<ReminderChannel[]>(initialChannels ? channels.filter((c) => initialChannels.includes(c)) : channels);
+	const chosen = picked.filter((c) => channels.includes(c));
 	const [lead, setLead] = useState(30);
 	const [time, setTime] = useState('09:00');
 	return (
 		<div className="reminder reminder__form small">
-			<p className="muted">🔁 반복 일정이라 매 회차마다 Discord DM으로 알려 드려요.</p>
+			<p className="muted">🔁 반복 일정이라 매 회차마다 알려 드려요.</p>
+			<ChannelPicker picked={picked} onChange={setPicked} />
 			{memo.due_at ? (
 				<label className="reminder__when">
 					알림 시점 (매 회차)
@@ -231,13 +267,12 @@ function RepeatingReminderForm({
 					<input type="time" value={time} onChange={(e) => setTime(e.target.value)} />
 				</label>
 			)}
-			{!discordReady && <p className="muted">⚙️ 설정에서 Discord 알림을 먼저 켜 주세요.</p>}
 			<div className="reminder__actions">
 				<button
 					type="button"
 					className="primary small"
-					disabled={busy || !discordReady || (!memo.due_at && !time)}
-					onClick={() => onSave(memo.due_at ? { leadMinutes: lead } : { time })}
+					disabled={busy || chosen.length === 0 || (!memo.due_at && !time)}
+					onClick={() => onSave({ ...(memo.due_at ? { leadMinutes: lead } : { time }), channels: chosen })}
 				>
 					{scheduled ? '변경' : '예약'}
 				</button>

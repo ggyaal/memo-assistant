@@ -1,5 +1,6 @@
-// Social login providers (Authorization Code + PKCE S256). Only identity is
-// requested; provider access tokens are used once and never stored.
+// Social login providers (Authorization Code; PKCE S256 where the provider documents it).
+// Only identity is requested; provider tokens are used once during the callback and never stored.
+import { oidcNonce, verifyGoogleIdToken } from './oidc.ts';
 
 export const PROVIDERS = ['google', 'discord', 'kakao'] as const;
 export type Provider = (typeof PROVIDERS)[number];
@@ -16,6 +17,20 @@ export interface AuthEnv {
 export interface Profile {
 	subject: string;
 	displayName: string;
+	/** An address the provider itself verified (Google email_verified), else null. Never an account key. */
+	email: string | null;
+}
+
+interface TokenResponse {
+	access_token?: string;
+	id_token?: string;
+}
+
+interface ProfileContext {
+	env: AuthEnv;
+	codeVerifier: string;
+	now: Date;
+	fetchFn: typeof fetch;
 }
 
 interface ProviderSpec {
@@ -27,7 +42,14 @@ interface ProviderSpec {
 	/** Kakao's client secret is optional (only when enabled in the console). */
 	clientSecret: (env: AuthEnv) => string | undefined;
 	secretRequired: boolean;
-	fetchProfile: (accessToken: string, fetchFn: typeof fetch) => Promise<Profile>;
+	/** Kakao's REST docs list no code_challenge / code_verifier parameters: state (+ cookie binding) only. */
+	pkce: boolean;
+	readProfile: (token: TokenResponse, ctx: ProfileContext) => Promise<Profile>;
+}
+
+function accessToken(token: TokenResponse): string {
+	if (!token.access_token) throw new Error('token response without access_token');
+	return token.access_token;
 }
 
 async function getJson(fetchFn: typeof fetch, url: string, accessToken: string): Promise<Record<string, unknown>> {
@@ -46,14 +68,23 @@ const SPECS: Record<Provider, ProviderSpec> = {
 		label: 'Google',
 		authorizeUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
 		tokenUrl: 'https://oauth2.googleapis.com/token',
-		scope: 'openid profile',
+		// OpenID Connect. No Gmail scope: reminder e-mails are sent by this service, not from the user's mailbox.
+		scope: 'openid email profile',
 		clientId: (env) => env.GOOGLE_CLIENT_ID,
 		clientSecret: (env) => env.GOOGLE_CLIENT_SECRET,
 		secretRequired: true,
-		async fetchProfile(token, fetchFn) {
-			const me = await getJson(fetchFn, 'https://openidconnect.googleapis.com/v1/userinfo', token);
-			if (typeof me.sub !== 'string') throw new Error('google profile without sub');
-			return { subject: me.sub, displayName: clipName(me.name, 'Google 사용자') };
+		pkce: true,
+		async readProfile(token, ctx) {
+			if (!token.id_token) throw new Error('google token response without id_token');
+			// Signature, issuer, audience, expiry and nonce are all checked; the identity is `sub`.
+			const claims = await verifyGoogleIdToken(token.id_token, {
+				clientId: ctx.env.GOOGLE_CLIENT_ID ?? '',
+				nonce: await oidcNonce(ctx.codeVerifier),
+				now: ctx.now,
+				fetchFn: ctx.fetchFn,
+			});
+			const email = claims.email_verified && claims.email && claims.email.length <= 254 ? claims.email.toLowerCase() : null;
+			return { subject: claims.sub, displayName: clipName(claims.name, 'Google 사용자'), email };
 		},
 	},
 	discord: {
@@ -64,10 +95,11 @@ const SPECS: Record<Provider, ProviderSpec> = {
 		clientId: (env) => env.DISCORD_CLIENT_ID,
 		clientSecret: (env) => env.DISCORD_CLIENT_SECRET,
 		secretRequired: true,
-		async fetchProfile(token, fetchFn) {
-			const me = await getJson(fetchFn, 'https://discord.com/api/users/@me', token);
+		pkce: true,
+		async readProfile(token, ctx) {
+			const me = await getJson(ctx.fetchFn, 'https://discord.com/api/users/@me', accessToken(token));
 			if (typeof me.id !== 'string') throw new Error('discord profile without id');
-			return { subject: me.id, displayName: clipName(me.global_name ?? me.username, 'Discord 사용자') };
+			return { subject: me.id, displayName: clipName(me.global_name ?? me.username, 'Discord 사용자'), email: null };
 		},
 	},
 	kakao: {
@@ -78,11 +110,15 @@ const SPECS: Record<Provider, ProviderSpec> = {
 		clientId: (env) => env.KAKAO_REST_API_KEY,
 		clientSecret: (env) => env.KAKAO_CLIENT_SECRET,
 		secretRequired: false,
-		async fetchProfile(token, fetchFn) {
-			const me = await getJson(fetchFn, 'https://kapi.kakao.com/v2/user/me', token);
+		pkce: false,
+		async readProfile(token, ctx) {
+			// `id` (회원번호) is the immutable identity; the nickname is only a display name.
+			const me = await getJson(ctx.fetchFn, 'https://kapi.kakao.com/v2/user/me', accessToken(token));
 			if (typeof me.id !== 'number' && typeof me.id !== 'string') throw new Error('kakao profile without id');
+			const account = (me.kakao_account ?? {}) as Record<string, unknown>;
+			const profile = (account.profile ?? {}) as Record<string, unknown>;
 			const props = (me.properties ?? {}) as Record<string, unknown>;
-			return { subject: String(me.id), displayName: clipName(props.nickname, '카카오 사용자') };
+			return { subject: String(me.id), displayName: clipName(profile.nickname ?? props.nickname, '카카오 사용자'), email: null };
 		},
 	},
 };
@@ -104,7 +140,7 @@ export function isConfigured(provider: Provider, env: AuthEnv): boolean {
 export function authorizeUrl(
 	provider: Provider,
 	env: AuthEnv,
-	params: { redirectUri: string; state: string; codeChallenge: string },
+	params: { redirectUri: string; state: string; codeChallenge: string; nonce?: string },
 ): string {
 	const spec = SPECS[provider];
 	const url = new URL(spec.authorizeUrl);
@@ -113,18 +149,24 @@ export function authorizeUrl(
 	url.searchParams.set('redirect_uri', params.redirectUri);
 	url.searchParams.set('scope', spec.scope);
 	url.searchParams.set('state', params.state);
-	url.searchParams.set('code_challenge', params.codeChallenge);
-	url.searchParams.set('code_challenge_method', 'S256');
-	if (provider === 'google') url.searchParams.set('prompt', 'select_account');
+	if (spec.pkce) {
+		url.searchParams.set('code_challenge', params.codeChallenge);
+		url.searchParams.set('code_challenge_method', 'S256');
+	}
+	if (provider === 'google') {
+		url.searchParams.set('prompt', 'select_account');
+		if (params.nonce) url.searchParams.set('nonce', params.nonce);
+	}
 	return url.toString();
 }
 
-/** Exchange the authorization code (server side, with PKCE verifier) and read the identity. */
+/** Exchange the authorization code (server side) and read the identity. Tokens are not kept. */
 export async function completeLogin(
 	provider: Provider,
 	env: AuthEnv,
 	params: { code: string; redirectUri: string; codeVerifier: string },
 	fetchFn: typeof fetch,
+	now: Date = new Date(),
 ): Promise<Profile> {
 	const spec = SPECS[provider];
 	const form = new URLSearchParams({
@@ -132,8 +174,8 @@ export async function completeLogin(
 		code: params.code,
 		redirect_uri: params.redirectUri,
 		client_id: spec.clientId(env) ?? '',
-		code_verifier: params.codeVerifier,
 	});
+	if (spec.pkce) form.set('code_verifier', params.codeVerifier);
 	const secret = spec.clientSecret(env);
 	if (secret) form.set('client_secret', secret);
 	const res = await fetchFn(spec.tokenUrl, {
@@ -142,7 +184,6 @@ export async function completeLogin(
 		body: form,
 	});
 	if (!res.ok) throw new Error(`token request failed: ${res.status}`);
-	const token = (await res.json()) as { access_token?: string };
-	if (!token.access_token) throw new Error('token response without access_token');
-	return spec.fetchProfile(token.access_token, fetchFn);
+	const token = (await res.json()) as TokenResponse;
+	return spec.readProfile(token, { env, codeVerifier: params.codeVerifier, now, fetchFn });
 }

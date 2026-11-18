@@ -245,6 +245,16 @@ export function updateDisplayName(displayName: string): Promise<{ displayName: s
 	});
 }
 
+/** Remove one login method (server refuses the last one, and needs a recent sign-in). */
+export function unlinkAccount(provider: ProviderId): Promise<{ unlinked: ProviderId; accounts: SettingsResponse['accounts'] }> {
+	return request(`/api/auth/accounts/${provider}`, { method: 'DELETE' });
+}
+
+/** Send a test e-mail to the verified Google address (e-mail channel on). */
+export function sendTestEmail(): Promise<{ accepted: true; to: string }> {
+	return request('/api/settings/notifications/email/test', { method: 'POST' });
+}
+
 export function setNotificationChannel(channel: NotificationChannel, enabled: boolean): Promise<{ status: ChannelStatus }> {
 	return request(`/api/settings/notifications/${channel}`, {
 		method: 'PUT',

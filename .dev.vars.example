@@ -17,10 +17,20 @@ DISCORD_SERVER_INVITE=
 # Server (guild) id of that server: Discord notifications unlock only after the user joins it.
 DISCORD_GUILD_ID=
 
-# Google Cloud Console → APIs & Services → Credentials → OAuth client (Web) (scopes: openid profile)
+# Google Cloud Console → APIs & Services → Credentials → OAuth client (Web application)
+# Scopes used: openid email profile (no Gmail scope). The ID token is verified (signature, iss, aud, exp, nonce).
 GOOGLE_CLIENT_ID=
 GOOGLE_CLIENT_SECRET=
 
-# Kakao Developers → 앱 → REST API 키 / 카카오 로그인 활성화 / (선택) Client Secret (동의항목: profile_nickname)
+# Kakao Developers → 앱 → 앱 키 "REST API 키" / 카카오 로그인 활성화 ON / 동의항목: 닉네임(profile_nickname)
+# Client Secret: only if "사용함" is ON in the console (then it is required).
 KAKAO_REST_API_KEY=
 KAKAO_CLIENT_SECRET=
+
+# E-mail reminders (sent by this service via Resend, never from the user's Gmail).
+# Resend needs a domain you own, verified in Resend (DNS records). Without both values e-mail stays off.
+EMAIL_API_KEY=
+# A sender on that verified domain, e.g. 메모비서 <noreply@your-domain.com>
+EMAIL_FROM=
+# Optional: daily cap on e-mails (Resend Free allows 100/day). Default 90.
+# EMAIL_DAILY_LIMIT=90

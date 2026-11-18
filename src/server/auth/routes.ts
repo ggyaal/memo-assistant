@@ -1,6 +1,7 @@
 import type { Context, Hono, MiddlewareHandler } from 'hono';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import { pkceChallenge, randomToken, safeEqual } from './crypto.ts';
+import { oidcNonce } from './oidc.ts';
 import { type AuthEnv, authorizeUrl, completeLogin, isConfigured, isProvider, PROVIDERS, type Provider, providerLabel } from './providers.ts';
 import {
 	createSession,
@@ -19,6 +20,12 @@ import {
 
 const SESSION_COOKIE = 'memo_session'; // sent as __Host-memo_session
 const STATE_COOKIE = 'memo_oauth'; // sent as __Host-memo_oauth
+/** Linking or unlinking a login method needs a session created by a provider login this recently. */
+export const RECENT_AUTH_MS = 10 * 60 * 1000;
+
+export function recentlyAuthenticated(user: SessionUser, now: Date): boolean {
+	return now.getTime() - Date.parse(user.authenticatedAt) <= RECENT_AUTH_MS;
+}
 
 /** Who is calling, decided only from the server-side session (never from request data). */
 export interface AuthContext {
@@ -100,13 +107,20 @@ export function registerAuthRoutes(
 		const { user } = c.get('auth');
 		const linking = c.req.query('link') === '1';
 		if (linking && !user) return redirectHome(c, 'login_required');
+		// A stolen or long-lived session must not be able to attach an attacker's account.
+		if (linking && !recentlyAuthenticated(user!, deps.now())) return redirectHome(c, 'reauth_required');
 		const state = randomToken();
 		const codeVerifier = randomToken() + randomToken(); // 86 chars (43–128 allowed)
 		await saveOAuthState(c.env.DB, state, { provider, codeVerifier, linkUserId: linking ? user!.userId : null }, deps.now());
 		// Bind the state to this browser: the callback must carry the same value in a cookie.
 		setCookie(c, STATE_COOKIE, state, { prefix: 'host', httpOnly: true, secure: true, sameSite: 'Lax', path: '/', maxAge: 600 });
 		return c.redirect(
-			authorizeUrl(provider, c.env, { redirectUri: callbackUrl(c, provider), state, codeChallenge: await pkceChallenge(codeVerifier) }),
+			authorizeUrl(provider, c.env, {
+				redirectUri: callbackUrl(c, provider),
+				state,
+				codeChallenge: await pkceChallenge(codeVerifier),
+				nonce: provider === 'google' ? await oidcNonce(codeVerifier) : undefined,
+			}),
 			302,
 		);
 	});
@@ -126,7 +140,7 @@ export function registerAuthRoutes(
 
 		let profile;
 		try {
-			profile = await completeLogin(provider, c.env, { code, redirectUri: callbackUrl(c, provider), codeVerifier: pending.codeVerifier }, deps.fetchFn);
+			profile = await completeLogin(provider, c.env, { code, redirectUri: callbackUrl(c, provider), codeVerifier: pending.codeVerifier }, deps.fetchFn, now);
 		} catch (error) {
 			console.error('oauth exchange failed', provider, String(error));
 			return redirectHome(c, 'provider_error');
@@ -136,7 +150,9 @@ export function registerAuthRoutes(
 			const { user } = c.get('auth');
 			if (!user || user.userId !== pending.linkUserId) return redirectHome(c, 'login_required');
 			const result = await linkAccount(c.env.DB, user.userId, provider, profile, now);
-			return result === 'owned_by_other' ? redirectHome(c, 'already_linked_elsewhere') : c.redirect('/?linked=' + provider, 302);
+			if (result === 'owned_by_other') return redirectHome(c, 'already_linked_elsewhere');
+			if (result === 'provider_taken') return redirectHome(c, 'provider_already_linked');
+			return c.redirect('/?linked=' + provider, 302);
 		}
 
 		const userId = await loginWithProfile(c.env.DB, provider, profile, now);

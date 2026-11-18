@@ -1,6 +1,6 @@
 import { type FormEvent, useEffect, useState } from 'react';
 import { fetchMe, fetchSettings, logout, type MeResponse } from './client/api.ts';
-import { SpaceContext } from './client/space.ts';
+import { type ReminderChannel, SpaceContext } from './client/space.ts';
 import { AccountBar } from './components/AccountBar.tsx';
 import { AgendaPanel } from './components/AgendaPanel.tsx';
 import { Landing } from './components/Landing.tsx';
@@ -24,6 +24,8 @@ const AUTH_MESSAGES: Record<string, string> = {
 	provider_error: '로그인 서비스와 통신하지 못했어요. 잠시 후 다시 시도해 주세요.',
 	login_required: '계정 연결은 로그인한 상태에서만 할 수 있어요.',
 	already_linked_elsewhere: '그 계정은 이미 다른 사용자와 연결되어 있어요. 계정은 자동으로 합치지 않습니다.',
+	provider_already_linked: '이미 같은 종류의 계정이 연결되어 있어요. 바꾸려면 설정에서 먼저 연결을 해제해 주세요.',
+	reauth_required: '보안을 위해 계정 연결·해제는 로그인한 지 10분 안에만 할 수 있어요. 다시 로그인한 뒤 시도해 주세요.',
 };
 
 function readStorage(key: string): string {
@@ -105,7 +107,7 @@ export function App() {
 	}
 
 	return (
-		<SpaceContext.Provider value={{ shared: me.workspace.kind === 'shared_guest', discordReady: false }}>
+		<SpaceContext.Provider value={{ shared: me.workspace.kind === 'shared_guest', channels: [], remindersReady: false }}>
 			{/* Re-mount per workspace: nothing from one space survives into another. */}
 			<WorkspaceView
 				key={me.workspace.id}
@@ -157,13 +159,17 @@ function WorkspaceView({
 		return 'memos';
 	});
 	const [guestNickname, setGuestNickname] = useState(() => readStorage(NICKNAME_KEY));
-	// Personal space: can reminders be booked? (Discord on + verified by a test DM)
-	const [discordReady, setDiscordReady] = useState(false);
+	// Personal space: which channels can deliver reminders? (Discord DM / e-mail, each verified by a test)
+	const [channels, setChannels] = useState<ReminderChannel[]>([]);
 	useEffect(() => {
 		if (!personal || view !== 'memos') return;
 		fetchSettings()
-			.then((s) => setDiscordReady(s.notifications.some((n) => n.channel === 'discord' && n.delivering)))
-			.catch(() => setDiscordReady(false));
+			.then((s) =>
+				setChannels(
+					s.notifications.filter((n) => n.delivering && (n.channel === 'discord' || n.channel === 'email')).map((n) => n.channel as ReminderChannel),
+				),
+			)
+			.catch(() => setChannels([]));
 	}, [personal, view]);
 	// Signed-in: the account's display name (editable in settings) is the author name.
 	const nickname = personal ? me.user!.displayName : guestNickname;
@@ -203,7 +209,7 @@ function WorkspaceView({
 	}
 
 	return (
-		<SpaceContext.Provider value={{ shared: !personal, discordReady }}>
+		<SpaceContext.Provider value={{ shared: !personal, channels, remindersReady: channels.length > 0 }}>
 		<main className="container layout">
 			<div className="layout__top">
 				{hero}

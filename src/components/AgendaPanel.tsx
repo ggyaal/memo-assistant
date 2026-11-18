@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useSpace } from '../client/space.ts';
+import { channelNames, useSpace } from '../client/space.ts';
 import { fetchAgenda } from '../client/api.ts';
 import { formatDue, formatKst } from '../client/format.ts';
 import type { AgendaResponse } from '../shared/types.ts';
@@ -13,7 +13,7 @@ import { SideCard } from './SideCard.tsx';
  * (drag & drop order, else AI priority). Display only — no notification is sent.
  */
 export function AgendaPanel({ refreshKey, onChanged }: { refreshKey: number; onChanged: () => void }) {
-	const { shared, discordReady } = useSpace();
+	const { shared, channels, remindersReady } = useSpace();
 	const [agenda, setAgenda] = useState<AgendaResponse | null>(null);
 	const [failed, setFailed] = useState(false);
 
@@ -55,7 +55,7 @@ export function AgendaPanel({ refreshKey, onChanged }: { refreshKey: number; onC
 								<span className="agenda__name">{memo.title}</span>
 								{memo.reminder_reason && <span className="muted small">{memo.reminder_reason}</span>}
 								{shared && <span className="muted small">by {memo.nickname}</span>}
-								{!shared && discordReady && <ReminderSwitch memo={memo} onChanged={onChanged} />}
+								{!shared && remindersReady && <ReminderSwitch memo={memo} onChanged={onChanged} />}
 							</li>
 						))}
 					</ol>
@@ -63,9 +63,9 @@ export function AgendaPanel({ refreshKey, onChanged }: { refreshKey: number; onC
 				<p className="muted small agenda__note">
 					{shared
 						? 'AI가 알림을 추천한 일정이에요. 공개 공간에서는 표시만 하며 실제 알림은 보내지 않습니다.'
-						: discordReady
-							? '알림이 추천된 일정은 자동으로 Discord DM이 예약돼요. 원하지 않으면 스위치로 끄세요.'
-							: '⚙️ 설정에서 Discord 알림을 켜면 추천된 일정을 자동으로 DM으로 알려 드려요.'}
+						: remindersReady
+							? `알림이 추천된 일정은 자동으로 ${channelNames(channels)} 알림이 예약돼요. 원하지 않으면 스위치로 끄세요.`
+							: '⚙️ 설정에서 Discord 또는 이메일 알림을 켜면 추천된 일정을 자동으로 알려 드려요.'}
 				</p>
 			</SideCard>
 

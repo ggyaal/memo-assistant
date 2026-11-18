@@ -46,6 +46,7 @@ interface MemoRow {
 	reminder_at: string | null;
 	reminder_status: ReminderStatus | null;
 	reminder_error: string | null;
+	reminder_channels: string | null;
 	recurrence: string | null;
 	recurrence_question: string | null;
 	author_key_hash: string | null;
@@ -58,9 +59,20 @@ const MEMO_SELECT = `
 	       m.due_at, m.due_date, m.due_text, m.reminder_recommended, m.reminder_reason,
 	       m.priority, m.priority_reason, m.manual_rank, m.completed_at, m.position, m.created_at,
 	       m.recurrence, m.recurrence_question, s.author_key_hash,
-	       n.scheduled_at AS reminder_at, n.status AS reminder_status, n.last_error AS reminder_error
+	       n.scheduled_at AS reminder_at, n.status AS reminder_status, n.last_error AS reminder_error, n.channels AS reminder_channels
 	FROM memos m JOIN sources s ON s.id = m.source_id
 	LEFT JOIN notifications n ON n.memo_id = m.id AND n.channel = 'discord' AND n.status <> 'canceled'`;
+
+/** null = every channel that is on at send time. */
+function reminderChannels(raw: string | null): ('discord' | 'email')[] | null {
+	if (!raw) return null;
+	try {
+		const list = JSON.parse(raw) as unknown;
+		return Array.isArray(list) ? list.filter((c): c is 'discord' | 'email' => c === 'discord' || c === 'email') : null;
+	} catch {
+		return null;
+	}
+}
 
 function toMemo(row: MemoRow): Memo {
 	return {
@@ -80,7 +92,10 @@ function toMemo(row: MemoRow): Memo {
 		priority_reason: row.priority_reason,
 		manual_rank: row.manual_rank,
 		completed_at: row.completed_at,
-		reminder: row.reminder_at && row.reminder_status ? { at: row.reminder_at, status: row.reminder_status, error: row.reminder_error } : null,
+		reminder:
+			row.reminder_at && row.reminder_status
+				? { at: row.reminder_at, status: row.reminder_status, error: row.reminder_error, channels: reminderChannels(row.reminder_channels) }
+				: null,
 		recurrence: parseRecurrence(row.recurrence),
 		recurrence_question: parseQuestion(row.recurrence_question),
 		// A short, non-reversible tag so a browser can recognise its own memos (the full hash stays on the server).

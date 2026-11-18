@@ -3,8 +3,10 @@ import {
 	ApiRequestError,
 	fetchSettings,
 	type MeResponse,
+	sendTestEmail,
 	sendTonePreview,
 	setNotificationChannel,
+	unlinkAccount,
 	updateDisplayName,
 	updateReminderTone,
 	updateReminderDefaults,
@@ -192,49 +194,20 @@ export function SettingsPage({ me, onBack, onProfileChanged }: { me: MeResponse;
 						<p className="muted small">시간대: {settings.timezone} (한국 시간)</p>
 					</form>
 
-					<section className="card settings__section" aria-labelledby="settings-accounts">
-						<h3 id="settings-accounts">연결된 계정</h3>
-						<p className="muted small">연결한 계정 중 어느 것으로 로그인해도 같은 개인 공간이 열려요. 이메일이 같아도 자동으로 합치지 않아요.</p>
-						<ul className="settings__list">
-							{PROVIDER_ORDER.map((id) => {
-								const provider = me.providers[id];
-								const linked = settings.linked.includes(id);
-								return (
-									<li key={id} className="settings__row">
-										<span className="settings__provider">
-											<span className={`provider-mark provider-mark--${id}`}>
-												<ProviderIcon id={id} />
-											</span>
-											{provider.label}
-										</span>
-										{linked ? (
-											<span className="badge badge--linked">연결됨</span>
-										) : provider.configured ? (
-											<a
-												className="link-button"
-												href={`/api/auth/${id}/start?link=1`}
-												onClick={() => {
-													try {
-														sessionStorage.setItem(RETURN_TO_SETTINGS_KEY, '1');
-													} catch {
-														// convenience only
-													}
-												}}
-											>
-												{provider.label} 연결하기
-											</a>
-										) : (
-											<span className="muted small">준비 중</span>
-										)}
-									</li>
-								);
-							})}
-						</ul>
-					</section>
+					<AccountsSection
+						me={me}
+						settings={settings}
+						onChanged={(accounts) =>
+							setSettings((s) => (s ? { ...s, accounts, linked: accounts.map((a) => a.provider) } : s))
+						}
+						onChannelsStale={() => void recheckChannels()}
+					/>
 
 					<section className="card settings__section" aria-labelledby="settings-notify">
 						<h3 id="settings-notify">알림 받을 경로</h3>
-						<p className="muted small">켜 둔 경로로, 메모에서 직접 예약한 알림을 받아요. 알림 시각은 메모마다 확인 후 정해요.</p>
+						<p className="muted small">
+							켜 둔 경로로 예약한 알림을 받아요. 경로마다 따로 켜고 끄며, 한 경로가 실패해도 다른 경로는 그대로 보내요. 알림 시각은 메모마다 확인 후 정해요.
+						</p>
 						<ul className="settings__list">
 							{settings.notifications.map((status) => {
 								const id = `channel-${status.channel}`;
@@ -254,6 +227,9 @@ export function SettingsPage({ me, onBack, onProfileChanged }: { me: MeResponse;
 												<span className="muted small" role="status">
 													Discord로 확인용 테스트 DM을 보내는 중…
 												</span>
+											)}
+											{status.channel === 'email' && (
+												<EmailExtras status={status} busy={channelBusy === 'email'} />
 											)}
 											{channelError[status.channel] && (
 												<span className="error small" role="alert">
@@ -278,6 +254,7 @@ export function SettingsPage({ me, onBack, onProfileChanged }: { me: MeResponse;
 						<ToneSection
 							tone={settings.reminderTone}
 							discord={settings.notifications.find((n) => n.channel === 'discord')}
+							email={settings.notifications.find((n) => n.channel === 'email')}
 							previewBusy={previewBusy}
 							status={toneStatus}
 							onChoose={(t) => void chooseTone(t)}
@@ -323,6 +300,197 @@ export function SettingsPage({ me, onBack, onProfileChanged }: { me: MeResponse;
 	);
 }
 
+const rememberSettings = () => {
+	try {
+		sessionStorage.setItem(RETURN_TO_SETTINGS_KEY, '1');
+	} catch {
+		// convenience only
+	}
+};
+
+/**
+ * Linked login methods. Linking/unlinking needs a sign-in within the last 10 minutes (the server
+ * checks it too); the last method can never be removed. Same e-mail never merges accounts.
+ */
+function AccountsSection({
+	me,
+	settings,
+	onChanged,
+	onChannelsStale,
+}: {
+	me: MeResponse;
+	settings: SettingsResponse;
+	onChanged: (accounts: SettingsResponse['accounts']) => void;
+	onChannelsStale: () => void;
+}) {
+	const [busy, setBusy] = useState<string | null>(null);
+	const [confirm, setConfirm] = useState<string | null>(null);
+	const [message, setMessage] = useState<{ text: string; error: boolean } | null>(null);
+	const allowed = settings.accountChanges.allowed;
+	const only = settings.accounts.length <= 1;
+	const relogin = settings.accounts.find((a) => me.providers[a.provider]?.configured)?.provider;
+
+	async function unlink(provider: SettingsResponse['accounts'][number]['provider']) {
+		setBusy(provider);
+		setMessage(null);
+		try {
+			const { accounts } = await unlinkAccount(provider);
+			onChanged(accounts);
+			onChannelsStale();
+			setMessage({ text: `${me.providers[provider].label} 연결을 해제했어요.`, error: false });
+		} catch (e) {
+			setMessage({ text: e instanceof ApiRequestError ? e.message : '해제하지 못했어요.', error: true });
+		} finally {
+			setBusy(null);
+			setConfirm(null);
+		}
+	}
+
+	return (
+		<section className="card settings__section" aria-labelledby="settings-accounts">
+			<h3 id="settings-accounts">연결된 계정</h3>
+			<p className="muted small">연결한 계정 중 어느 것으로 로그인해도 같은 개인 공간이 열려요. 이메일이 같아도 자동으로 합치지 않아요.</p>
+			{!allowed && (
+				<p className="notice small" role="note">
+					🔐 보안을 위해 계정 연결·해제는 로그인한 지 10분 안에만 할 수 있어요.{' '}
+					{relogin && (
+						<a className="link-button" href={`/api/auth/${relogin}/start`} onClick={rememberSettings}>
+							{me.providers[relogin].label}로 다시 로그인
+						</a>
+					)}
+				</p>
+			)}
+			<ul className="settings__list">
+				{PROVIDER_ORDER.map((id) => {
+					const provider = me.providers[id];
+					const account = settings.accounts.find((a) => a.provider === id);
+					return (
+						<li key={id} className="settings__row">
+							<span className="settings__provider">
+								<span className={`provider-mark provider-mark--${id}`}>
+									<ProviderIcon id={id} />
+								</span>
+								<span>
+									{provider.label}
+									{account && (
+										<span className="muted small settings__account-detail">
+											{' '}
+											· {account.displayName ?? '이름 없음'}
+											{account.email ? ` · ${account.email} (인증됨)` : ''}
+										</span>
+									)}
+								</span>
+							</span>
+							{account ? (
+								<span className="row">
+									<span className="badge badge--linked">연결됨</span>
+									{confirm === id ? (
+										<>
+											<button type="button" className="danger small" disabled={busy === id} onClick={() => void unlink(id)}>
+												{busy === id ? '해제하는 중…' : '해제 확인'}
+											</button>
+											<button type="button" className="link-button small" onClick={() => setConfirm(null)}>
+												취소
+											</button>
+										</>
+									) : (
+										<button
+											type="button"
+											className="link-button small"
+											disabled={!allowed || only || !!busy}
+											title={only ? '마지막 로그인 방법은 해제할 수 없어요' : !allowed ? '다시 로그인한 뒤 해제할 수 있어요' : undefined}
+											onClick={() => setConfirm(id)}
+										>
+											연결 해제
+										</button>
+									)}
+								</span>
+							) : provider.configured ? (
+								allowed ? (
+									<a className="link-button" href={`/api/auth/${id}/start?link=1`} onClick={rememberSettings}>
+										{provider.label} 연결하기
+									</a>
+								) : (
+									<span className="muted small">다시 로그인 후 연결</span>
+								)
+							) : (
+								<span className="muted small">준비 중</span>
+							)}
+						</li>
+					);
+				})}
+			</ul>
+			{only && <p className="muted small">마지막 로그인 방법은 해제할 수 없어요. 해제하려면 다른 계정을 먼저 연결해 주세요.</p>}
+			{confirm && (
+				<p className="muted small" role="status">
+					해제하면 그 계정으로는 이 개인 공간에 로그인할 수 없어요.
+					{confirm === 'discord' ? ' Discord 알림도 꺼져요.' : confirm === 'google' ? ' 이메일 알림도 꺼져요.' : ''}
+				</p>
+			)}
+			{message && (
+				<p className={message.error ? 'error small' : 'muted small'} role={message.error ? 'alert' : 'status'}>
+					{message.text}
+				</p>
+			)}
+		</section>
+	);
+}
+
+/**
+ * E-mail channel details: recipient (verified Google address), privacy warning, test button and the
+ * latest failure. "Accepted" means the mail service took the message — not that it reached the inbox.
+ */
+function EmailExtras({ status, busy }: { status: ChannelStatus; busy: boolean }) {
+	const [sending, setSending] = useState(false);
+	const [result, setResult] = useState<{ text: string; error: boolean } | null>(null);
+	async function test() {
+		setSending(true);
+		setResult(null);
+		try {
+			const { to } = await sendTestEmail();
+			setResult({ text: `${to}로 테스트 메일 발송 요청이 접수됐어요. 메일함(스팸함 포함)을 확인해 주세요.`, error: false });
+		} catch (e) {
+			setResult({ text: e instanceof ApiRequestError ? e.message : '보내지 못했어요.', error: true });
+		} finally {
+			setSending(false);
+		}
+	}
+	return (
+		<>
+			{status.address && (
+				<span className="small">
+					받는 주소: <strong>{status.address}</strong> <span className="muted">(Google 인증 주소)</span>
+				</span>
+			)}
+			{status.available && (
+				<span className="muted small">⚠️ 메모 제목·시각이 메일 본문과 제목에 담겨요. 메일함은 다른 사람이 볼 수도 있으니 민감한 내용은 적지 마세요.</span>
+			)}
+			{busy && (
+				<span className="muted small" role="status">
+					확인용 테스트 메일을 보내는 중…
+				</span>
+			)}
+			{status.enabled && (
+				<span className="row">
+					<button type="button" className="secondary small" disabled={sending} onClick={() => void test()}>
+						{sending ? '보내는 중…' : '📬 테스트 메일 보내기'}
+					</button>
+				</span>
+			)}
+			{result && (
+				<span className={result.error ? 'error small' : 'muted small'} role={result.error ? 'alert' : 'status'}>
+					{result.text}
+				</span>
+			)}
+			{status.lastFailure && (
+				<span className="error small" role="note">
+					최근 발송 실패({new Date(status.lastFailure.at).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul', month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit' })}): {status.lastFailure.message}
+				</span>
+			)}
+		</>
+	);
+}
+
 /** Step before the Discord switch: join the bot's server (bots can only DM members of a shared server). */
 function DiscordServerJoin({
 	server,
@@ -359,6 +527,7 @@ function DiscordServerJoin({
 function ToneSection({
 	tone,
 	discord,
+	email,
 	previewBusy,
 	status,
 	onChoose,
@@ -366,12 +535,13 @@ function ToneSection({
 }: {
 	tone: ReminderTone;
 	discord: ChannelStatus | undefined;
+	email: ChannelStatus | undefined;
 	previewBusy: boolean;
 	status: { text: string; error: boolean } | null;
 	onChoose: (tone: ReminderTone) => void;
 	onPreview: () => void;
 }) {
-	const usable = !!discord?.available;
+	const usable = !!discord?.available || !!email?.available;
 	const { memo, timing } = sampleTiming(new Date());
 	const card = reminderCard(tone, memo, timing);
 	return (
@@ -379,8 +549,8 @@ function ToneSection({
 			<legend>알림 말투</legend>
 			<p id="tone-help" className="muted small">
 				{usable
-					? 'Discord 알림 문장의 말투예요. AI 없이 정해진 문장에 메모 제목과 시간만 넣어요. 예: “병원 방문” 30분 전'
-					: 'Discord 알림을 쓸 수 있을 때 고를 수 있어요(Discord 계정 연결·서버 가입 필요).'}
+					? 'Discord DM과 이메일 알림 문장의 말투예요. AI 없이 정해진 문장에 메모 제목과 시간만 넣어요. 예: “병원 방문” 30분 전'
+					: 'Discord나 이메일 알림을 쓸 수 있을 때 고를 수 있어요.'}
 			</p>
 			<div className="tone-options" role="radiogroup" aria-label="알림 말투">
 				{REMINDER_TONES.map((t) => (
@@ -402,10 +572,10 @@ function ToneSection({
 				</span>
 			</div>
 			<div className="row">
-				<button type="button" className="secondary small" disabled={!discord?.enabled || previewBusy} onClick={onPreview}>
+				<button type="button" className="secondary small" disabled={!discord?.enabled || previewBusy} onClick={onPreview} hidden={!discord?.available}>
 					{previewBusy ? '보내는 중…' : '🧪 이 말투로 미리보기 DM 보내기'}
 				</button>
-				{!discord?.enabled && usable && <span className="muted small">Discord 알림을 켜면 보낼 수 있어요.</span>}
+				{!discord?.enabled && discord?.available && <span className="muted small">Discord 알림을 켜면 보낼 수 있어요.</span>}
 			</div>
 			{status && (
 				<p className={status.error ? 'error small' : 'muted small'} role={status.error ? 'alert' : 'status'}>

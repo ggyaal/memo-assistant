@@ -25,7 +25,7 @@ describe('migration 0013 (recurrence) keeps existing data', () => {
 			const memo = await db.prepare('SELECT * FROM memos').first<Record<string, unknown>>();
 			const notification = await db.prepare('SELECT * FROM notifications').first<Record<string, unknown>>();
 			expect(memo).toEqual({ ...before.memo, recurrence: null, recurrence_question: null });
-			expect(notification).toEqual({ ...before.notification, occurrence_date: null, remind_time: null });
+			expect(notification).toEqual({ ...before.notification, occurrence_date: null, remind_time: null, channels: null }); // channels: 0016
 			expect((await db.prepare('SELECT COUNT(*) AS n FROM memo_occurrences').first<{ n: number }>())?.n).toBe(0);
 			expect((await db.prepare('SELECT COUNT(*) AS n FROM reminder_deliveries').first<{ n: number }>())?.n).toBe(0);
 		} finally {

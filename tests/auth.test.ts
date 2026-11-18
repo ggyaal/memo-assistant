@@ -6,6 +6,10 @@ import { createApi, type ApiBindings } from '../src/server/routes.ts';
 import { createSaveMemosTool, type MemoJob } from '../src/tools/save-memos.ts';
 import { CRON_LOOKAHEAD_MS, runDueReminders } from '../src/server/notify/reminders.ts';
 import { createTestD1 } from './helpers/d1.ts';
+import { createFakeGoogle } from './helpers/google.ts';
+import { resetJwksCache } from '../src/server/auth/oidc.ts';
+
+const google = await createFakeGoogle('google-client');
 
 /*
  * Phase A access-control tests. Providers are faked at the HTTP level:
@@ -31,6 +35,9 @@ const ENV: Partial<ApiBindings> = {
 	DISCORD_SERVER_INVITE: 'https://discord.gg/memo-test',
 	// Kakao intentionally not configured.
 };
+
+/** E-mails the fake Resend API accepted. */
+const sentEmails: { from: string; to: string; subject: string; html: string; text: string; key: string | null; auth: string }[] = [];
 
 /** Discord member lookups the fake bot API received: "guild/user (auth)". */
 const memberChecks: string[] = [];
@@ -60,17 +67,40 @@ const fakeFetch: typeof fetch = async (input, init) => {
 		sentDms.push({ to: dm[1], content: String(body.content), body, auth: new Headers(init?.headers).get('authorization') ?? '' });
 		return Response.json({ id: 'msg' });
 	}
+	if (url === google.jwksUrl) return google.jwks();
+	// Fake Resend API. Recipients "bounce-*" are refused (422), "flaky-*" get a 500 (retryable).
+	if (url === 'https://api.resend.com/emails') {
+		const body = JSON.parse(String(init?.body)) as { from: string; to: string[]; subject: string; html: string; text: string };
+		const to = body.to[0];
+		if (to.startsWith('bounce')) return Response.json({ name: 'validation_error' }, { status: 422 });
+		if (to.startsWith('flaky')) return new Response('oops', { status: 503 });
+		sentEmails.push({ ...body, to, key: new Headers(init?.headers).get('idempotency-key'), auth: new Headers(init?.headers).get('authorization') ?? '' });
+		return Response.json({ id: `email-${sentEmails.length}` });
+	}
 	if (url.includes('/token')) {
 		const form = new URLSearchParams(String(init?.body));
 		tokenRequests.push(form);
 		const code = form.get('code') ?? '';
-		if (!code.startsWith('sub:')) return new Response('bad code', { status: 400 });
-		return Response.json({ access_token: `tok:${code.slice(4)}`, token_type: 'Bearer' });
+		if (!code.startsWith('sub:')) return new Response('bad code', { status: 400 }); // e.g. an expired / reused code
+		const id = code.slice(4);
+		if (url === 'https://oauth2.googleapis.com/token') {
+			// Google: identity comes from the signed ID token. "<id>@unverified" → email_verified false;
+			// "forged-*" → signed with an unpublished key; "wrongaud-*" → token for another app.
+			const [sub, flag] = id.split('@');
+			const claims = { sub, name: `G-${sub}`, email: `${sub}@gmail.com`, email_verified: flag !== 'unverified' };
+			let idToken = await google.idTokenFor(form, claims, clock);
+			if (sub.startsWith('forged-')) idToken = await google.sign({ ...JSON.parse(atob(idToken.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))) }, { foreignKey: true });
+			if (sub.startsWith('wrongaud-')) idToken = await google.idTokenFor(form, { ...claims, aud: 'other-app', azp: 'other-app' }, clock);
+			if (sub.startsWith('expired-')) idToken = await google.idTokenFor(form, { ...claims, exp: Math.floor(clock.getTime() / 1000) - 3600 }, clock);
+			if (sub.startsWith('nonce-')) idToken = await google.idTokenFor(new URLSearchParams({ code_verifier: 'another' }), claims, clock);
+			return Response.json({ access_token: `tok:${sub}`, id_token: idToken, token_type: 'Bearer' });
+		}
+		return Response.json({ access_token: `tok:${id}`, token_type: 'bearer' });
 	}
 	const auth = new Headers(init?.headers).get('authorization') ?? '';
 	const id = auth.replace('Bearer tok:', '');
 	if (url.startsWith('https://discord.com/api/users/@me')) return Response.json({ id, username: id, global_name: `D-${id}` });
-	if (url.startsWith('https://openidconnect.googleapis.com')) return Response.json({ sub: id, name: `G-${id}` });
+	if (url.startsWith('https://kapi.kakao.com/v2/user/me')) return Response.json({ id: Number(id), kakao_account: { profile: { nickname: `K-${id}` } } });
 	return new Response('unexpected', { status: 500 });
 };
 
@@ -124,7 +154,7 @@ function makeApp(envOverride: Partial<ApiBindings> = {}) {
 
 type Send = ReturnType<typeof makeApp>;
 
-async function login(send: Send, provider: 'discord' | 'google', subject: string, jar: Jar = new Map(), link = false) {
+async function login(send: Send, provider: 'discord' | 'google' | 'kakao', subject: string, jar: Jar = new Map(), link = false) {
 	const start = await send(`/api/auth/${provider}/start${link ? '?link=1' : ''}`, { jar });
 	expect(start.status).toBe(302);
 	const state = new URL(start.headers.get('location')!).searchParams.get('state')!;
@@ -155,6 +185,8 @@ beforeEach(async () => {
 	clock = new Date('2026-11-15T03:00:00Z');
 	tokenRequests.length = 0;
 	sentDms.length = 0;
+	sentEmails.length = 0;
+	resetJwksCache();
 });
 afterEach(async () => dispose());
 
@@ -840,7 +872,7 @@ describe('reminders: confirm, cancel and deliver (Discord DM)', () => {
 		const res = await remind(send, jar, memo.id, { leadMinutes: 30 });
 		expect(res.status).toBe(200);
 		expect(await res.json()).toEqual({ scheduledAt: '2026-11-16T05:30:00.000Z' });
-		expect((await list(send, jar))[0].reminder).toEqual({ at: '2026-11-16T05:30:00.000Z', status: 'scheduled', error: null });
+		expect((await list(send, jar))[0].reminder).toEqual({ at: '2026-11-16T05:30:00.000Z', status: 'scheduled', error: null, channels: null });
 	});
 
 	it('date-only memo needs an explicit time (no invented time)', async () => {
@@ -941,7 +973,7 @@ describe('reminders: confirm, cancel and deliver (Discord DM)', () => {
 		expect((await list(send, jar))[0].reminder).toMatchObject({ at: '2026-11-17T00:00:00.000Z', status: 'scheduled' });
 	});
 
-	it('only channels that can deliver are accepted (Kakao/Gmail are not yet), and at least one is needed', async () => {
+	it('only channels that can deliver are accepted (Kakao never; e-mail only when switched on), and at least one is needed', async () => {
 		const { send, jar, memo } = await aliceWithMemo();
 		const body = (channels: string[]) => ({ at: '2026-11-16T14:30:00+09:00', channels });
 		const err = async (channels: string[]) => {
@@ -949,7 +981,7 @@ describe('reminders: confirm, cancel and deliver (Discord DM)', () => {
 			return [res.status, ((await res.json()) as { error?: string }).error];
 		};
 		expect(await err(['kakao'])).toEqual([422, 'channel_unavailable']);
-		expect(await err(['discord', 'email'])).toEqual([422, 'channel_unavailable']);
+		expect(await err(['discord', 'email'])).toEqual([409, 'channel_off']); // e-mail not switched on for this user
 		expect(await err([])).toEqual([422, 'invalid_request']);
 		expect(await err(['sms'])).toEqual([400, 'invalid_request']);
 		expect((await remind(send, jar, memo.id, body(['discord']))).status).toBe(200);
@@ -1146,7 +1178,7 @@ describe('automatic reminders for AI-recommended memos (turn off in the upcoming
 		const { send, jar } = await ready();
 		const res = await postMemo(send, '내일 오후 3시 팀 회의', jar);
 		const created = (await res.json()) as { memos: Item[] };
-		expect(created.memos[0].reminder).toEqual({ at: '2026-11-16T05:30:00.000Z', status: 'scheduled', error: null });
+		expect(created.memos[0].reminder).toEqual({ at: '2026-11-16T05:30:00.000Z', status: 'scheduled', error: null, channels: null });
 		await postMemo(send, '내일 그냥 메모', jar); // not recommended → nothing
 		expect((await byTitle(send, jar, '그냥')).reminder).toBeNull();
 	});
@@ -1212,5 +1244,337 @@ describe('automatic reminders for AI-recommended memos (turn off in the upcoming
 	])('rejects defaults: %s', async (_l, body) => {
 		const { send, jar } = await ready();
 		expect((await send('/api/settings/reminders', { method: 'PATCH', jar, headers: json, body: JSON.stringify(body) })).status).toBe(400);
+	});
+});
+
+// ---- Google (OpenID Connect) / Kakao login, linking and unlinking (2026-11-18) ----------------
+describe('Google / Kakao login', () => {
+	const KAKAO = { KAKAO_REST_API_KEY: 'kakao-rest', KAKAO_CLIENT_SECRET: 'kakao-secret' };
+	const accountRow = (provider: string, subject: string) =>
+		db.prepare('SELECT user_id, email, email_verified_at FROM oauth_accounts WHERE provider = ? AND provider_subject = ?').bind(provider, subject).first<{ user_id: string; email: string | null; email_verified_at: string | null }>();
+	const settings = async (send: Send, jar: Jar) => (await (await send('/api/settings', { jar })).json()) as import('../src/shared/types.ts').SettingsResponse;
+
+	it('Google: minimal OIDC scopes (no Gmail), nonce + PKCE, verified e-mail kept; new personal space; session survives reload; logout ends it', async () => {
+		const send = makeApp();
+		const start = await send('/api/auth/google/start', { jar: new Map() });
+		const url = new URL(start.headers.get('location')!);
+		expect(url.origin + url.pathname).toBe('https://accounts.google.com/o/oauth2/v2/auth');
+		expect(url.searchParams.get('scope')).toBe('openid email profile');
+		expect(url.searchParams.get('scope')).not.toContain('gmail');
+		expect(url.searchParams.get('code_challenge_method')).toBe('S256');
+		expect(url.searchParams.get('nonce')).toMatch(/^[0-9a-f]{64}$/);
+
+		const { jar, location } = await login(send, 'google', 'gwen');
+		expect(location).toBe('/');
+		const first = await me(send, jar);
+		expect(first).toMatchObject({ mode: 'user', workspace: { kind: 'personal' }, user: { displayName: 'G-gwen', linked: ['google'] } });
+		expect(await accountRow('google', 'gwen')).toMatchObject({ email: 'gwen@gmail.com' });
+		expect((await accountRow('google', 'gwen'))?.email_verified_at).toBeTruthy();
+		// Reload = same cookie → same user and space.
+		expect((await me(send, jar)).workspace.id).toBe(first.workspace.id);
+		expect((await send('/api/auth/logout', { method: 'POST', jar })).status).toBe(200);
+		expect((await me(send, jar)).mode).toBe('guest');
+		expect(await db.prepare('SELECT COUNT(*) AS n FROM sessions').first<{ n: number }>()).toEqual({ n: 0 });
+	});
+
+	it('Google: an unverified address is not kept (cannot become an e-mail recipient)', async () => {
+		const send = makeApp();
+		await login(send, 'google', 'una@unverified');
+		expect(await accountRow('google', 'una')).toMatchObject({ email: null, email_verified_at: null });
+	});
+
+	it.each([
+		['forged-x', 'signed with an unknown key'],
+		['wrongaud-x', 'issued for another app'],
+		['expired-x', 'expired'],
+		['nonce-x', 'nonce from another login'],
+	])('Google: an ID token %s (%s) is refused safely: no user, no session', async (subject) => {
+		const send = makeApp();
+		const { jar, location } = await login(send, 'google', subject);
+		expect(location).toBe('/?auth_error=provider_error');
+		expect((await me(send, jar)).mode).toBe('guest');
+		expect(await db.prepare('SELECT COUNT(*) AS n FROM users').first<{ n: number }>()).toEqual({ n: 0 });
+	});
+
+	it('Kakao: no PKCE parameters (not in Kakao docs), REST key + secret on the server, numeric id as identity; a separate space', async () => {
+		const send = makeApp(KAKAO);
+		expect((await me(send)).providers.kakao).toEqual({ label: '카카오', configured: true });
+		const start = await send('/api/auth/kakao/start', { jar: new Map() });
+		const url = new URL(start.headers.get('location')!);
+		expect(url.origin + url.pathname).toBe('https://kauth.kakao.com/oauth/authorize');
+		expect(url.searchParams.get('client_id')).toBe('kakao-rest');
+		expect(url.searchParams.get('scope')).toBe('profile_nickname');
+		expect(url.searchParams.has('code_challenge')).toBe(false);
+		expect(url.searchParams.get('state')).toBeTruthy();
+
+		const k = (await login(send, 'kakao', '123456789')).jar;
+		const token = tokenRequests.at(-1)!;
+		expect([token.get('client_id'), token.get('client_secret'), token.has('code_verifier')]).toEqual(['kakao-rest', 'kakao-secret', false]);
+		const kakaoMe = await me(send, k);
+		expect(kakaoMe).toMatchObject({ mode: 'user', user: { displayName: 'K-123456789', linked: ['kakao'] } });
+		const g = (await login(send, 'google', 'gwen')).jar;
+		expect((await me(send, g)).workspace.id).not.toBe(kakaoMe.workspace.id);
+		// Reload and logout.
+		expect((await me(send, k)).workspace.id).toBe(kakaoMe.workspace.id);
+		await send('/api/auth/logout', { method: 'POST', jar: k });
+		expect((await me(send, k)).mode).toBe('guest');
+	});
+
+	it('Kakao: forged state / reused code / provider error are refused without creating a user', async () => {
+		const send = makeApp(KAKAO);
+		const jar: Jar = new Map();
+		const start = await send('/api/auth/kakao/start', { jar });
+		const state = new URL(start.headers.get('location')!).searchParams.get('state')!;
+		expect((await send(`/api/auth/kakao/callback?code=sub:1&state=forged`, { jar })).headers.get('location')).toBe('/?auth_error=invalid_state');
+		const again = await send('/api/auth/kakao/start', { jar });
+		const s2 = new URL(again.headers.get('location')!).searchParams.get('state')!;
+		expect((await send(`/api/auth/kakao/callback?code=expired&state=${s2}`, { jar })).headers.get('location')).toBe('/?auth_error=provider_error');
+		const s3 = new URL((await send('/api/auth/kakao/start', { jar })).headers.get('location')!).searchParams.get('state')!;
+		expect((await send(`/api/auth/kakao/callback?error=access_denied&state=${s3}`, { jar })).headers.get('location')).toBe('/?auth_error=cancelled');
+		expect(state).not.toBe(s2);
+		expect(await db.prepare('SELECT COUNT(*) AS n FROM users').first<{ n: number }>()).toEqual({ n: 0 });
+	});
+
+	it('linked accounts open the same user and memos; an unlinked account with the same e-mail is a different user', async () => {
+		const send = makeApp(KAKAO);
+		const d = (await login(send, 'discord', 'dana')).jar;
+		await postMemo(send, '디스코드로 쓴 개인 메모', d);
+		expect((await login(send, 'google', 'dana-g', d, true)).location).toBe('/?linked=google');
+		expect((await login(send, 'kakao', '777', d, true)).location).toBe('/?linked=kakao');
+		const viaGoogle = (await login(send, 'google', 'dana-g')).jar;
+		const viaKakao = (await login(send, 'kakao', '777')).jar;
+		const ids = await Promise.all([d, viaGoogle, viaKakao].map(async (j) => (await me(send, j)).workspace.id));
+		expect(new Set(ids).size).toBe(1);
+		expect((await titles(send, viaKakao)).map((m) => m.title)).toEqual(['디스코드로 쓴 개인 메모']);
+		const users = new Set([(await accountRow('discord', 'dana'))!.user_id, (await accountRow('google', 'dana-g'))!.user_id, (await accountRow('kakao', '777'))!.user_id]);
+		expect(users.size).toBe(1);
+
+		// Another Google account whose address equals nothing special: never merged by e-mail.
+		await db.prepare("UPDATE oauth_accounts SET email = 'same@gmail.com' WHERE provider_subject = 'dana-g'").run();
+		const other = (await login(send, 'google', 'same')).jar; // its verified e-mail is same@gmail.com
+		expect((await accountRow('google', 'same'))?.email).toBe('same@gmail.com');
+		expect((await me(send, other)).workspace.id).not.toBe(ids[0]);
+		expect(await titles(send, other)).toEqual([]);
+	});
+
+	it('linking: another user\'s account is never taken, a second account of the same kind is refused, and an old session must sign in again', async () => {
+		const send = makeApp(KAKAO);
+		await login(send, 'kakao', '42'); // Bob
+		const alice = (await login(send, 'discord', 'alice')).jar;
+		expect((await login(send, 'kakao', '42', alice, true)).location).toBe('/?auth_error=already_linked_elsewhere');
+		await login(send, 'google', 'alice-g', alice, true);
+		expect((await login(send, 'google', 'alice-g2', alice, true)).location).toBe('/?auth_error=provider_already_linked');
+		expect((await me(send, alice)).user?.linked).toEqual(['discord', 'google']);
+		// 11 minutes later the same session cannot link or unlink until it signs in again.
+		clock = new Date(clock.getTime() + 11 * 60_000);
+		expect((await send('/api/auth/kakao/start?link=1', { jar: alice })).headers.get('location')).toBe('/?auth_error=reauth_required');
+		const s = await settings(send, alice);
+		expect(s.accountChanges).toEqual({ allowed: false, until: null });
+		const del = await send('/api/auth/accounts/google', { method: 'DELETE', jar: alice });
+		expect([del.status, ((await del.json()) as { error: string }).error]).toEqual([401, 'reauth_required']);
+		const fresh = (await login(send, 'discord', 'alice')).jar;
+		expect((await settings(send, fresh)).accountChanges.allowed).toBe(true);
+		expect((await send('/api/auth/accounts/google', { method: 'DELETE', jar: fresh })).status).toBe(200);
+		expect((await me(send, fresh)).user?.linked).toEqual(['discord']);
+	});
+
+	it('unlinking: never the last method; other sites and guests are refused; the dependent channel is switched off', async () => {
+		const send = makeApp();
+		const jar = (await login(send, 'discord', 'solo')).jar;
+		const last = await send('/api/auth/accounts/discord', { method: 'DELETE', jar });
+		expect([last.status, ((await last.json()) as { error: string }).error]).toEqual([409, 'last_login_method']);
+		await login(send, 'google', 'solo-g', jar, true);
+		expect((await send('/api/settings/notifications/discord', { method: 'PUT', jar, headers: { 'content-type': 'application/json' }, body: '{"enabled":true}' })).status).toBe(200);
+		expect((await send('/api/auth/accounts/discord', { method: 'DELETE', jar, headers: { origin: 'https://evil.example' } })).status).toBe(403);
+		expect((await send('/api/auth/accounts/discord', { method: 'DELETE' })).status).toBe(401);
+		expect((await send('/api/auth/accounts/kakao', { method: 'DELETE', jar })).status).toBe(404);
+		expect((await send('/api/auth/accounts/discord', { method: 'DELETE', jar })).status).toBe(200);
+		const s = await settings(send, jar);
+		expect(s.notifications.find((n) => n.channel === 'discord')).toMatchObject({ enabled: false, available: false });
+		// The freed Discord account can now be used by itself (a new user), never silently back into this one.
+		const again = (await login(send, 'discord', 'solo')).jar;
+		expect((await me(send, again)).workspace.id).not.toBe((await me(send, jar)).workspace.id);
+	});
+
+	it('settings show linked accounts with the verified Google address to the owner only', async () => {
+		const send = makeApp();
+		const jar = (await login(send, 'discord', 'owner')).jar;
+		await login(send, 'google', 'owner-g', jar, true);
+		const s = await settings(send, jar);
+		expect(s.accounts.map((a) => [a.provider, a.email])).toEqual([['discord', null], ['google', 'owner-g@gmail.com']]);
+		expect((await send('/api/settings')).status).toBe(401);
+		const guestMe = JSON.stringify(await me(send));
+		expect(guestMe).not.toContain('owner-g@gmail.com');
+	});
+});
+
+// ---- E-mail reminders (service-sent, verified Google address, independent of Discord) -----------
+describe('e-mail reminders', () => {
+	const json = { 'content-type': 'application/json' };
+	const MAIL = { EMAIL_API_KEY: 're_test_key', EMAIL_FROM: '메모비서 <noreply@memo.example>' };
+	type Status = import('../src/shared/types.ts').ChannelStatus;
+	const emailStatus = async (send: Send, jar: Jar) =>
+		((await (await send('/api/settings', { jar })).json()) as { notifications: Status[] }).notifications.find((n) => n.channel === 'email')!;
+	const toggle = (send: Send, jar: Jar, channel: string, enabled: boolean) =>
+		send(`/api/settings/notifications/${channel}`, { method: 'PUT', jar, headers: json, body: JSON.stringify({ enabled }) });
+	const remind = (send: Send, jar: Jar, id: string, body: object) => send(`/api/memos/${id}/reminder`, { method: 'PUT', jar, headers: json, body: JSON.stringify(body) });
+	const list = async (send: Send, jar: Jar) =>
+		((await (await send('/api/memos?scope=all', { jar })).json()) as { memos: { id: string; reminder: { status: string; error: string | null; channels?: string[] | null } | null }[] }).memos;
+	const attempts = () =>
+		db.prepare('SELECT channel, outcome, error_code FROM notification_attempts WHERE notification_id IS NOT NULL ORDER BY attempted_at, channel').all<{ channel: string; outcome: string; error_code: string | null }>().then((r) => r.results);
+	const run = (env: object = MAIL) => runDueReminders({ DB: db, DISCORD_BOT_TOKEN: 'bot-token', PUBLIC_APP_URL: 'https://memo.example/', ...env } as never, clock, fakeFetch);
+
+	/** Discord login + linked Google (verified address <sub>@gmail.com), Discord on, one memo due 15:00 KST tomorrow. */
+	async function user(googleSub = 'mia', env: Partial<ApiBindings> = MAIL) {
+		const send = makeApp(env);
+		const jar = (await login(send, 'discord', `${googleSub}-d`)).jar;
+		await login(send, 'google', googleSub, jar, true);
+		expect((await toggle(send, jar, 'discord', true)).status).toBe(200);
+		await postMemo(send, '내일 보고서 제출', jar);
+		const memo = (await list(send, jar))[0];
+		await db.prepare("UPDATE memos SET due_at = '2026-11-16T06:00:00.000Z' WHERE id = ?").bind(memo.id).run();
+		sentDms.length = 0;
+		sentEmails.length = 0;
+		return { send, jar, memo };
+	}
+
+	it('default OFF: nothing is e-mailed; Discord reminders work exactly as before', async () => {
+		const { send, jar, memo } = await user();
+		expect(await emailStatus(send, jar)).toMatchObject({ available: true, enabled: false, address: 'mia@gmail.com' });
+		expect((await remind(send, jar, memo.id, { leadMinutes: 30 })).status).toBe(200);
+		clock = new Date('2026-11-16T05:30:05Z');
+		expect(await run()).toMatchObject({ sent: 1 });
+		expect(sentDms).toHaveLength(1);
+		expect(sentEmails).toHaveLength(0);
+	});
+
+	it('switching on sends a real test e-mail first (only on acceptance); the test button works; 5 tests a day', async () => {
+		const { send, jar } = await user();
+		const on = await toggle(send, jar, 'email', true);
+		expect(on.status).toBe(200);
+		expect(sentEmails).toHaveLength(1);
+		expect(sentEmails[0]).toMatchObject({ to: 'mia@gmail.com', from: '메모비서 <noreply@memo.example>', subject: '[메모비서] 이메일 알림 테스트', auth: 'Bearer re_test_key' });
+		expect(await emailStatus(send, jar)).toMatchObject({ enabled: true, delivering: true });
+		const test = await send('/api/settings/notifications/email/test', { method: 'POST', jar });
+		expect([test.status, await test.json()]).toEqual([200, { accepted: true, to: 'mia@gmail.com' }]);
+		for (let i = 0; i < 3; i++) await send('/api/settings/notifications/email/test', { method: 'POST', jar });
+		expect((await send('/api/settings/notifications/email/test', { method: 'POST', jar })).status).toBe(429);
+		expect((await send('/api/settings/notifications/email/test', { method: 'POST', jar, headers: { origin: 'https://evil.example' } })).status).toBe(403);
+		expect((await send('/api/settings/notifications/email/test', { method: 'POST' })).status).toBe(401);
+	});
+
+	it('a refused test e-mail keeps the channel off and shows the failure', async () => {
+		const { send, jar } = await user('bounce');
+		const on = await toggle(send, jar, 'email', true);
+		expect(on.status).toBe(409);
+		const status = await emailStatus(send, jar);
+		expect(status).toMatchObject({ enabled: false });
+		expect(status.lastFailure?.message).toContain('거부');
+	});
+
+	it('without a configured sender: cannot be switched on, and nothing ever counts as sent (no fake success)', async () => {
+		const { send, jar, memo } = await user('nosender', {});
+		const status = await emailStatus(send, jar);
+		expect(status).toMatchObject({ available: false, enabled: false });
+		expect(status.note).toContain('발신 서비스');
+		expect((await toggle(send, jar, 'email', true)).status).toBe(409);
+		// Even if the preference were on (e.g. the key was removed later): a recorded failure, never "accepted".
+		await db.prepare("INSERT INTO notification_preferences (user_id, channel, enabled, verified_at, updated_at) SELECT user_id, 'email', 1, '2026-11-15T00:00:00.000Z', '2026-11-15T00:00:00.000Z' FROM oauth_accounts WHERE provider = 'google'").run();
+		expect((await remind(send, jar, memo.id, { leadMinutes: 30 })).status).toBe(200);
+		clock = new Date('2026-11-16T05:30:05Z');
+		expect(await run({})).toMatchObject({ sent: 1 }); // Discord delivered
+		expect(sentEmails).toHaveLength(0);
+		expect(await attempts()).toEqual([
+			{ channel: 'discord', outcome: 'accepted', error_code: null },
+			{ channel: 'email', outcome: 'failed', error_code: 'email_not_configured' },
+		]);
+		expect((await list(send, jar))[0].reminder).toMatchObject({ status: 'sent', error: 'email:email_not_configured' });
+		expect((await db.prepare("SELECT COUNT(*) AS n FROM notification_attempts WHERE channel = 'email' AND outcome = 'accepted'").first<{ n: number }>())?.n).toBe(0);
+	});
+
+	it('both channels on: one DM and one e-mail at the time; overlapping/repeated runs never duplicate', async () => {
+		const { send, jar, memo } = await user();
+		await toggle(send, jar, 'email', true);
+		sentEmails.length = 0;
+		expect((await remind(send, jar, memo.id, { leadMinutes: 30 })).status).toBe(200);
+		clock = new Date('2026-11-16T05:30:05Z');
+		const [a, b] = await Promise.all([run(), run()]);
+		expect(a.sent + b.sent).toBe(1);
+		await run();
+		expect(sentDms).toHaveLength(1);
+		expect(sentEmails).toHaveLength(1);
+		const mail = sentEmails[0];
+		expect(mail.subject).toBe('[메모비서] 내일 보고서 제출 · 30분 전');
+		expect(mail.text).toContain('30분 남았어요');
+		expect(mail.html).toContain('href="https://memo.example/"');
+		expect(mail.key).toMatch(/:once@2026-11-16T05:30:00.000Z:email$/);
+	});
+
+	it('channels are independent: e-mail failing (retryable) is retried alone; Discord is not sent twice', async () => {
+		const { send, jar, memo } = await user('flaky');
+		await db.prepare("INSERT INTO notification_preferences (user_id, channel, enabled, verified_at, updated_at) SELECT user_id, 'email', 1, '2026-11-15T00:00:00.000Z', '2026-11-15T00:00:00.000Z' FROM oauth_accounts WHERE provider = 'google'").run();
+		await remind(send, jar, memo.id, { leadMinutes: 30 });
+		clock = new Date('2026-11-16T05:30:05Z');
+		expect(await run()).toMatchObject({ retried: 1 });
+		expect(sentDms).toHaveLength(1);
+		clock = new Date('2026-11-16T05:33:00Z');
+		await run();
+		clock = new Date('2026-11-16T05:38:00Z');
+		await run();
+		expect(sentDms).toHaveLength(1); // never resent
+		expect((await attempts()).map((r) => `${r.channel}:${r.outcome}`)).toEqual(['discord:accepted', 'email:retry', 'email:retry', 'email:failed']);
+		expect((await list(send, jar))[0].reminder).toMatchObject({ status: 'sent', error: 'email:email_http_503' });
+	});
+
+	it('only e-mail chosen for this memo: no DM; e-mail only users (Kakao + Google) can book reminders', async () => {
+		const send = makeApp({ ...MAIL, KAKAO_REST_API_KEY: 'kakao-rest' });
+		const jar = (await login(send, 'kakao', '555')).jar;
+		await login(send, 'google', 'kim', jar, true);
+		expect((await toggle(send, jar, 'email', true)).status).toBe(200);
+		expect((await toggle(send, jar, 'discord', true)).status).toBe(409); // no Discord account
+		await postMemo(send, '내일 보고서 제출', jar);
+		const memo = (await list(send, jar))[0];
+		await db.prepare("UPDATE memos SET due_at = '2026-11-16T06:00:00.000Z' WHERE id = ?").bind(memo.id).run();
+		expect((await remind(send, jar, memo.id, { leadMinutes: 0, channels: ['discord'] })).status).toBe(409);
+		expect((await remind(send, jar, memo.id, { leadMinutes: 0, channels: ['email'] })).status).toBe(200);
+		expect((await list(send, jar))[0].reminder?.channels).toEqual(['email']);
+		sentEmails.length = 0;
+		clock = new Date('2026-11-16T06:00:05Z');
+		expect(await run()).toMatchObject({ sent: 1 });
+		expect(sentDms).toHaveLength(0);
+		expect(sentEmails.map((m) => m.to)).toEqual(['kim@gmail.com']);
+	});
+
+	it('done or deleted memos are not e-mailed; unlinking Google switches e-mail off', async () => {
+		const { send, jar, memo } = await user();
+		await toggle(send, jar, 'email', true);
+		await remind(send, jar, memo.id, { leadMinutes: 30 });
+		await send(`/api/memos/${memo.id}`, { method: 'PATCH', jar, headers: json, body: JSON.stringify({ completed: true }) });
+		sentEmails.length = 0;
+		clock = new Date('2026-11-16T05:30:05Z');
+		expect(await run()).toMatchObject({ sent: 0 });
+		expect(sentEmails).toHaveLength(0);
+		expect((await send('/api/auth/accounts/google', { method: 'DELETE', jar })).status).toBe(401); // a day-old session: sign in again first
+		const fresh = (await login(send, 'discord', 'mia-d')).jar;
+		expect((await send('/api/auth/accounts/google', { method: 'DELETE', jar: fresh })).status).toBe(200);
+		expect(await emailStatus(send, fresh)).toMatchObject({ enabled: false, available: false, address: null });
+	});
+
+	it('an unverified Google address can never receive reminders; a guest or another user cannot see or change e-mail settings', async () => {
+		const { send, jar } = await user('pat@unverified');
+		expect(await emailStatus(send, jar)).toMatchObject({ available: false, address: null });
+		expect((await toggle(send, jar, 'email', true)).status).toBe(409);
+		expect((await send('/api/settings/notifications/email', { method: 'PUT', headers: json, body: '{"enabled":true}' })).status).toBe(401);
+		const other = (await login(send, 'discord', 'other')).jar;
+		expect((await emailStatus(send, other)).address ?? null).toBeNull();
+	});
+
+	it('the sending path never calls Workers AI (templates only)', async () => {
+		const { send, jar, memo } = await user();
+		await toggle(send, jar, 'email', true);
+		await remind(send, jar, memo.id, { leadMinutes: 30 });
+		clock = new Date('2026-11-16T05:30:05Z');
+		const AI = { run: () => { throw new Error('AI must not be called while sending'); } };
+		expect(await run({ ...MAIL, AI })).toMatchObject({ sent: 1 });
 	});
 });

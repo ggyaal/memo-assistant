@@ -196,10 +196,39 @@
 - 오늘 로컬에서 실제 Workers AI를 호출한 횟수: 진행 표시 1회, 취소 3회(수정 전 1, 수정 후 2). 운영에서는 AI를 호출하지 않았다.
 - 롤백: `npx wrangler rollback <Version>`. 오늘 마이그레이션(0007–0011)은 모두 테이블·컬럼을 추가하기만 해서 이전 코드도 동작한다. 0007 되돌리기는 `docs/rollback/0007_down.sql`(원격 데이터 변경은 별도 승인).
 
-## 7. 실행한 검증 (마지막 실행: 2026-11-15)
+## 6-1. Google·카카오 로그인과 이메일 알림 (2026-11-18 구현, 23:56 KST 운영 배포)
+지시서: `.claude/MEMO_ASSISTANT_GOOGLE_KAKAO_AUTH_EMAIL.md`. 기존 Discord 인증 구조(`providers.ts`/`store.ts`/`routes.ts`)와 Cron 발송기를 재사용했고, 새 Cron은 추가하지 않았다.
+
+| 단계 | 결과 |
+|---|---|
+| 1 분석 | Google은 provider 정의만 있었다(scope `openid profile`, ID 토큰 검증·이메일 없음). 연결 해제가 없었고, 이메일 채널은 "준비 중"이었다. `notifications.channel`은 CHECK 조건상 `'discord'`만 허용한다. 로컬 `.dev.vars`와 운영 secret에는 Google·카카오 키가 **없다**(이름만 확인). |
+| 2 로그인 | Google: `openid email profile`, PKCE S256, nonce(= 서버 보관 PKCE verifier의 해시), **ID 토큰 RS256 서명(JWKS)·iss·aud(azp)·exp·iat·nonce 검증** 후 `sub`로 식별한다. `email_verified=true`인 주소만 저장한다. 카카오: 공식 REST 문서에 PKCE 파라미터가 없어 보내지 않고, state + 브라우저 쿠키 바인딩만 쓴다. 회원번호 `id`로 식별하고, 동의항목은 `profile_nickname`이다. 공급자 토큰은 저장하지 않는다. |
+| 3 연결·해제 | 명시적 연결만 허용한다. 남의 계정은 빼앗지 않고, 같은 종류의 계정은 하나만 연결한다. **연결·해제는 로그인한 지 10분 안에만** 가능하다. 마지막 로그인 수단은 해제할 수 없다(조건부 DELETE로 경합도 막음). 해제하면 그 계정에 딸린 알림 채널(Discord·이메일)이 꺼진다. 설정 화면에 연결 계정, 인증된 이메일, 해제 확인, 다시 로그인 안내를 넣었다. |
+| 4 메일 공급자 | Cloudflare Email Service의 Email Sending은 Workers Free에서 "Not available"이고 Paid에서만 월 3,000통이 포함된다. 또 Cloudflare DNS에 올린 도메인이 필요하다 → **제외**. Resend Free는 월 3,000통·하루 100통·도메인 3개를 주지만 "You must add and verify at least one domain"이다 → **어댑터로 선택하되, 도메인이 없으면 비활성**. 구성은 `EmailSender` 인터페이스, `resendSender`, `notConfiguredSender`(항상 실패, 성공 처리 없음)다. |
+| 5 Cron 통합 | 기존 매분 Cron을 그대로 쓴다. 알림 행은 이제 채널 **목록**(`channels`, NULL = 켜 둔 모든 채널)을 갖는다. 채널마다 `reminder_deliveries(memo, channel, occurrence)` 기본 키로 멱등을 보장하고(1회성은 `once@<scheduled_at>`), 일시 오류는 그 채널만 재시도한다(다른 채널은 다시 보내지 않음). 모든 시도는 `notification_attempts`에 기록한다(`accepted` = 공급자가 접수함 ≠ 수신 확인). 메일은 HTML 카드 + text/plain이고, Discord와 같은 말투 템플릿을 쓴다(AI 없음). 앱 하루 상한 `EMAIL_DAILY_LIMIT`은 기본 90이다. |
+| 6 테스트·문서 | 아래 §7. `.dev.vars.example`, README 반영. |
+
+- 마이그레이션 `0016_google_kakao_email.sql`(추가만): `oauth_accounts.email`, `oauth_accounts.email_verified_at`, `notifications.channels`, 새 테이블 `notification_attempts`. 되돌리기는 `docs/rollback/0016_down.sql`(보통 코드 롤백만으로 충분). `tests/migration-0016.test.ts`로 기존 사용자·계정·설정·알림·공개 메모가 바뀌지 않음을 확인했다.
+- **실제 Google·카카오 로그인과 실제 메일 발송은 아직 하지 않았다.** 키·발신 도메인이 없기 때문이다. 공급자는 HTTP 수준의 가짜 서버로 테스트했다. Google은 실제 RSA 키로 서명한 ID 토큰을 쓰고, 운영 검증 코드가 그대로 실행된다.
+- 브라우저 확인(headless Chrome, `dev:offline`, API 모킹, 1100px 라이트 · 360px 다크): 로그인 버튼 3종 링크, 설정 연결 계정(최근 로그인 아님 → 해제 비활성 + 「Discord로 다시 로그인」), 이메일 켜기 → 테스트 메일 접수 문구 → 최근 실패 표시, 메모 알림 폼의 Discord/이메일/카카오톡(제공 안 함) 토글 → 이메일만 골라 예약하면 `channels: ["email"]` 전송. 두 폭 모두 가로 스크롤 없음.
+- **운영 반영 (2026-11-18 23:56 KST, 사용자 요청)**:
+  - Secret: 사용자가 `GOOGLE_CLIENT_ID`·`GOOGLE_CLIENT_SECRET`·`KAKAO_REST_API_KEY`·`KAKAO_CLIENT_SECRET`·`EMAIL_API_KEY`를 등록했다(이름만 확인). **`EMAIL_FROM`은 아직 없어 이메일 알림은 "발신 서비스 준비 안 됨"으로 꺼져 있다.**
+  - 배포 전 상태: Secret을 넣는 동안 이전 코드(scope `openid profile`, 카카오 PKCE)로 버튼이 잠시 켜져 있었다.
+  - D1: 백업(`.wrangler/backups/prod-20261118-pre-0016.sql`)한 뒤 0016을 적용했다. 전후 users 2·oauth_accounts 2·sources 33·memos 46·notifications 12·preferences 1로 같다.
+  - 배포: Version `67e1ba35-9eba-4998-9d0f-08d9138dca23`, 매분 Cron 유지.
+  - 운영 확인(로그인·메일 없이):
+    - 홈 200, `/api/me`에서 세 공급자 모두 `configured: true`
+    - Google 시작 주소: `scope=openid email profile`, S256, nonce → Google 로그인 화면으로 넘어감(redirect·client 오류 없음)
+    - 카카오 시작 주소: PKCE 없이 state만 → 카카오 로그인 화면(KOE 오류 없음)
+    - 비로그인 settings·해제·테스트 메일 401, 다른 사이트 해제 403, 위조 state → `invalid_state`
+  - **실제 Google·카카오 로그인과 메일 수신은 사용자 확인이 남아 있다.**
+- 이메일 발송량·비용(가정): 개인 사용자 10명 × 하루 알림 3건 ≈ 월 900통이다. Resend Free(월 3,000·하루 100) 안이며, 넘으면 앱 상한(90/일)에서 `email_daily_limit`으로 실패 기록된다(과금 없음, Pro는 월 $20·50,000통). AI 비용과는 별개이며 **발송 경로에서 AI 호출 0회**다(테스트로 확인).
+
+## 7. 실행한 검증 (마지막 실행: 2026-11-18)
 | 명령 | 결과 |
 |---|---|
 | `npm run check:types` | 성공 |
+| `npm test` (2026-11-18) | 18개 파일, **434개 테스트** 통과: Google OIDC(위조 서명·다른 aud·만료·nonce 불일치 거부), 카카오(PKCE 미전송·REST 키·회원번호), 연결·해제(10분 재인증·마지막 수단·남의 계정·같은 종류 중복), 이메일(기본 꺼짐·테스트 메일 접수 후에만 켜짐·발신자 없으면 성공 처리 없음·채널 독립 재시도·중복 없음·완료 메모 제외·AI 0회), 템플릿 escape·text/plain·모바일, 0016 데이터 보존 |
 | `npm test` | 16개 파일, **405개 테스트** 통과 (로그인·격리·설정·Discord 알림·정각 발송·SSE 진행·취소·알림 시각 규칙·메모 수정·아이디어 목록 포함) |
 | `npm run test:worker` | **9개 테스트** 통과 (빌드 Worker, workerd, CORS 없음, 403/415, `/api/usage`, `/api/agenda`, `/api/transcribe` 검증) |
 | 로컬 브라우저 확인 (headless Chrome + `dev:offline`, 시드 데이터, 2026-11-14) | **17/17 통과**: 드래그 중 표시, C를 맨 위로 드래그 → 새로고침 후 C·A·B 유지, ▲ 버튼, 체크 → 취소선 → 새로고침 유지 → 해제, 어제 기한 미완료 표시 / 완료·기한 없음 미표시, 삭제 → 새로고침 후 미복구, 모바일 390px 가로 스크롤 없음, 콘솔 오류 없음 |
@@ -209,7 +238,7 @@
 
 ## 8. 다음 작업
 1. 운영에서 사용자 확인이 남은 것: 진행 표시·취소, 새 알림 입력(4분 규칙), 메모 수정과 "N분 전" 알림 이동, 사이드 고정·접기, 아이디어 목록, 미가입 계정의 서버 가입 안내.
-2. Google·카카오 로그인 키를 받으면 설정한다(카카오 버튼 문구는 공식 가이드 확인). 카카오톡·Gmail 알림은 정책·발송 수단이 정해진 뒤 알림 경로를 행별로 저장하도록 바꾼다.
+2. Google·카카오 키(Workers Secrets)와 Redirect URI를 등록한 뒤 실제 로그인을 1회씩 확인한다. 이메일은 소유 도메인을 Resend에서 인증하고 `EMAIL_API_KEY`·`EMAIL_FROM`을 넣은 뒤 테스트 메일 도착을 확인한다(§6-1). 카카오톡 메시지 알림은 범위 밖이다.
 3. 운영 중 `wrangler tail`이나 대시보드로 CPU 초과와 오류율을 주기적으로 확인한다(R2, R5). 매분 Cron과 SSE 연결도 함께 본다.
 4. 브라우저 수동 확인(U2), 모바일 폭 포함.
 5. P1 남은 항목: 👍/👎 피드백, 작성자 필터 UI(API는 `nickname` 쿼리로 구현됨).

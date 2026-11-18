@@ -51,7 +51,8 @@ import {
 } from './rate-limit.ts';
 import { describeSensitive, detectSensitive } from '../shared/privacy.ts';
 import type { AuthEnv } from './auth/providers.ts';
-import { linkedProviders } from './auth/store.ts';
+import { linkedProviders, listAccounts, unlinkAccount } from './auth/store.ts';
+import { isProvider } from './auth/providers.ts';
 import {
 	autoScheduleRecommended,
 	followDeadline,
@@ -61,8 +62,8 @@ import {
 	setReminder,
 	setReminderDefaults,
 } from './notify/reminders.ts';
-import { type Channel, CHANNELS, channelStatuses, getReminderTone, sendTonePreview, setChannel, setDisplayName, setReminderTone, type SettingsEnv } from './settings.ts';
-import { type AuthVariables, registerAuthRoutes, resolveAuth } from './auth/routes.ts';
+import { type Channel, CHANNELS, channelStatuses, getReminderTone, sendTestEmail, sendTonePreview, setChannel, setDisplayName, setReminderTone, type SettingsEnv } from './settings.ts';
+import { type AuthVariables, RECENT_AUTH_MS, recentlyAuthenticated, registerAuthRoutes, resolveAuth } from './auth/routes.ts';
 import { sha256Hex } from './auth/crypto.ts';
 import { kstDate, kstDayRangeUtc } from './time.ts';
 import { expand, isOccurrence, loadDone, occurrenceAt, withUpcoming } from './occurrences.ts';
@@ -384,15 +385,41 @@ export function createApi(deps: ApiDeps) {
 	api.get('/settings', async (c) => {
 		const { user } = c.get('auth');
 		if (!user) return fail(c, 401, 'login_required', '로그인이 필요합니다.');
-		const linked = await linkedProviders(c.env.DB, user.userId);
+		const accounts = await listAccounts(c.env.DB, user.userId);
+		const linked = accounts.map((a) => a.provider);
+		const recent = recentlyAuthenticated(user, now());
 		return c.json<SettingsResponse>({
 			displayName: user.displayName,
 			timezone: 'Asia/Seoul',
 			linked,
-			notifications: await channelStatuses(c.env.DB, c.env, user.userId, linked, fetchFn),
+			accounts,
+			accountChanges: {
+				allowed: recent,
+				until: recent ? new Date(Date.parse(user.authenticatedAt) + RECENT_AUTH_MS).toISOString() : null,
+			},
+			notifications: await channelStatuses(c.env.DB, c.env, user.userId, linked, fetchFn, now()),
 			reminderDefaults: await getReminderDefaults(c.env.DB, user.userId),
 			reminderTone: await getReminderTone(c.env.DB, user.userId),
 		});
+	});
+
+	// Remove one login method (never the last one). Needs a recent sign-in, like linking.
+	api.delete('/auth/accounts/:provider', async (c) => {
+		const blocked = crossSiteBlock(c, false);
+		if (blocked) return blocked;
+		const { user } = c.get('auth');
+		if (!user) return fail(c, 401, 'login_required', '로그인이 필요합니다.');
+		const provider = c.req.param('provider');
+		if (!isProvider(provider)) return fail(c, 404, 'not_found', '알 수 없는 로그인 방법입니다.');
+		if (!recentlyAuthenticated(user, now())) {
+			return fail(c, 401, 'reauth_required', '보안을 위해 연결 해제는 로그인한 지 10분 안에만 할 수 있어요. 다시 로그인해 주세요.');
+		}
+		const limited = await mutationLimit(c, now());
+		if (limited) return limited;
+		const result = await unlinkAccount(c.env.DB, user.userId, provider, now());
+		if (result === 'not_linked') return fail(c, 404, 'not_found', '연결되지 않은 계정이에요.');
+		if (result === 'last_method') return fail(c, 409, 'last_login_method', '마지막 로그인 방법은 해제할 수 없어요. 다른 계정을 먼저 연결해 주세요.');
+		return c.json({ unlinked: provider, accounts: await listAccounts(c.env.DB, user.userId) });
 	});
 
 	// Discord reminder wording: one of four fixed templates (no AI).
@@ -420,6 +447,19 @@ export function createApi(deps: ApiDeps) {
 		const result = await sendTonePreview(c.env.DB, c.env, user.userId, now(), fetchFn);
 		if (!result.ok) return fail(c, 409, result.code === 'channel_off' ? 'channel_off' : 'test_failed', result.message);
 		return c.json({ sent: true });
+	});
+
+	// Test e-mail to the verified Google address ("accepted" = the provider took it, not proof of arrival).
+	api.post('/settings/notifications/email/test', async (c) => {
+		const blocked = crossSiteBlock(c, false);
+		if (blocked) return blocked;
+		const { user } = c.get('auth');
+		if (!user) return fail(c, 401, 'login_required', '로그인이 필요합니다.');
+		const limited = await mutationLimit(c, now());
+		if (limited) return limited;
+		const result = await sendTestEmail(c.env.DB, c.env, user.userId, now(), fetchFn);
+		if (!result.ok) return fail(c, result.code === 'limited' ? 429 : 409, result.code === 'channel_off' ? 'channel_off' : 'test_failed', result.message);
+		return c.json({ accepted: true, to: result.to });
 	});
 
 	api.patch('/settings/reminders', async (c) => {
@@ -465,10 +505,10 @@ export function createApi(deps: ApiDeps) {
 		const limited = await mutationLimit(c, now());
 		if (limited) return limited;
 		const result = await setChannel(c.env.DB, c.env, user.userId, channel as Channel, parsed.output.enabled, now(), fetchFn);
-		const status = (await channelStatuses(c.env.DB, c.env, user.userId, undefined, fetchFn)).find((s) => s.channel === channel)!;
+		const status = (await channelStatuses(c.env.DB, c.env, user.userId, undefined, fetchFn, now())).find((s) => s.channel === channel)!;
 		if (!result.ok) return c.json({ error: result.code === 'unavailable' ? 'channel_unavailable' : 'test_failed', message: result.message, status }, 409);
 		const scheduled =
-			channel === 'discord' && parsed.output.enabled
+			channel !== 'kakao' && parsed.output.enabled
 				? await autoScheduleRecommended(c.env.DB, { userId: user.userId, workspaceId: user.workspace.id }, now())
 				: 0;
 		return c.json({ status, scheduled });

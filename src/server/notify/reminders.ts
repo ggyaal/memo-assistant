@@ -5,6 +5,8 @@ import { addDays, describeRecurrence, nextOccurrence, parseRecurrence, type Recu
 import { occurrenceAt } from '../occurrences.ts';
 import { kstDate } from '../time.ts';
 import { sendDiscordDm } from './discord.ts';
+import { consumeEmailQuota, type EmailEnv, emailReady, emailRecipient, emailSenderFromEnv, recordAttempt } from './email.ts';
+import { reminderEmail } from '../../shared/email-template.ts';
 
 export const LEAD_OPTIONS = [0, 10, 30, 60] as const;
 /** Time of day for repeating memos without a time, unless the user chose one in settings (user decision 2026-11-15). */
@@ -16,7 +18,7 @@ const TOO_LATE_MS = 60 * 60 * 1000;
 const STUCK_SENDING_MS = 10 * 60 * 1000;
 const KST_OFFSET_MS = 9 * 60 * 60 * 1000;
 
-export interface NotifyEnv {
+export interface NotifyEnv extends EmailEnv {
 	DB: D1Database;
 	DISCORD_BOT_TOKEN?: string;
 	/** Public https address of this app, for the card's link button (optional). */
@@ -41,6 +43,29 @@ export async function discordReady(db: D1Database, userId: string): Promise<bool
 	return !!row && row.enabled === 1 && !!row.verified_at;
 }
 
+/** Channels that can actually deliver reminders (KakaoTalk is not one of them). */
+export type DeliveryChannel = 'discord' | 'email';
+const CHANNEL_NAMES: Record<DeliveryChannel, string> = { discord: 'Discord', email: '이메일' };
+
+/** The user's channels that are on and verified right now (each one independent of the others). */
+export async function readyChannels(db: D1Database, userId: string): Promise<DeliveryChannel[]> {
+	const out: DeliveryChannel[] = [];
+	if ((await discordRecipient(db, userId)) && (await discordReady(db, userId))) out.push('discord');
+	if (await emailReady(db, userId)) out.push('email');
+	return out;
+}
+
+/** notifications.channels: null = every channel that is on at send time. */
+export function parseChannels(raw: string | null): DeliveryChannel[] | null {
+	if (!raw) return null;
+	try {
+		const list = JSON.parse(raw) as unknown;
+		return Array.isArray(list) ? (list.filter((c) => c === 'discord' || c === 'email') as DeliveryChannel[]) : null;
+	} catch {
+		return null;
+	}
+}
+
 export type SetReminderResult =
 	| { ok: true; scheduledAt: string }
 	| { ok: false; status: 404 | 409 | 422; code: string; message: string };
@@ -60,21 +85,29 @@ export async function setReminder(
 		.first<{ id: string; due_at: string | null; due_date: string | null; completed_at: string | null; recurrence: string | null }>();
 	if (!memo) return { ok: false, status: 404, code: 'not_found', message: '메모를 찾지 못했어요.' };
 	if (memo.completed_at) return { ok: false, status: 409, code: 'conflict', message: '완료한 메모에는 알림을 걸 수 없어요.' };
+	const ready = await readyChannels(db, params.userId);
+	let chosen: DeliveryChannel[] | null = null;
 	if (params.channels) {
-		// Kakao and Gmail are shown but cannot deliver yet: never accept them silently.
+		// KakaoTalk is shown but cannot deliver: never accept it silently.
 		if (params.channels.length === 0) return { ok: false, status: 422, code: 'invalid_request', message: '알림 받을 곳을 하나 이상 켜 주세요.' };
-		if (params.channels.some((ch) => ch !== 'discord')) {
-			return { ok: false, status: 422, code: 'channel_unavailable', message: '카카오톡·Gmail 알림은 아직 준비 중이에요. Discord만 켜 주세요.' };
+		if (params.channels.some((ch) => ch === 'kakao')) {
+			return { ok: false, status: 422, code: 'channel_unavailable', message: '카카오톡 알림은 아직 준비 중이에요. Discord나 이메일을 골라 주세요.' };
 		}
+		const off = (params.channels as DeliveryChannel[]).filter((ch) => !ready.includes(ch));
+		if (off.length) {
+			return { ok: false, status: 409, code: 'channel_off', message: `설정에서 ${off.map((c) => CHANNEL_NAMES[c]).join('·')} 알림을 먼저 켜 주세요(테스트 성공 필요).` };
+		}
+		chosen = [...new Set(params.channels as DeliveryChannel[])];
 	}
-	if (!(await discordReady(db, params.userId))) {
-		return { ok: false, status: 409, code: 'channel_off', message: '설정에서 Discord 알림을 먼저 켜 주세요(테스트 DM 성공 필요).' };
+	if (ready.length === 0) {
+		return { ok: false, status: 409, code: 'channel_off', message: '설정에서 Discord 또는 이메일 알림을 먼저 켜 주세요(테스트 성공 필요).' };
 	}
+	const channelsJson = chosen ? JSON.stringify(chosen) : null;
 
 	// Missing choices fall back to the user's own defaults (never an invented time).
 	const defaults = await getReminderDefaults(db, params.userId);
 	const rule = parseRecurrence(memo.recurrence);
-	if (rule) return setRepeatingReminder(db, params, { ...memo, rule }, defaults, now);
+	if (rule) return setRepeatingReminder(db, params, { ...memo, rule }, defaults, now, channelsJson);
 
 	let scheduledAt: string;
 	let lead: number | null;
@@ -114,14 +147,14 @@ export async function setReminder(
 	const nowIso = now.toISOString();
 	await db
 		.prepare(
-			`INSERT INTO notifications (id, user_id, workspace_id, memo_id, channel, scheduled_at, lead_minutes, status, attempts, next_attempt_at, created_at, updated_at)
-			 VALUES (?, ?, ?, ?, 'discord', ?, ?, 'scheduled', 0, ?, ?, ?)
+			`INSERT INTO notifications (id, user_id, workspace_id, memo_id, channel, scheduled_at, lead_minutes, status, attempts, next_attempt_at, created_at, updated_at, channels)
+			 VALUES (?, ?, ?, ?, 'discord', ?, ?, 'scheduled', 0, ?, ?, ?, ?)
 			 ON CONFLICT(memo_id, channel) DO UPDATE SET
 			   scheduled_at = excluded.scheduled_at, lead_minutes = excluded.lead_minutes, status = 'scheduled',
 			   attempts = 0, next_attempt_at = excluded.next_attempt_at, last_error = NULL, sent_at = NULL, updated_at = excluded.updated_at,
-			   occurrence_date = NULL, remind_time = NULL`,
+			   occurrence_date = NULL, remind_time = NULL, channels = excluded.channels`,
 		)
-		.bind(crypto.randomUUID(), params.userId, params.workspaceId, memo.id, scheduledAt, lead, scheduledAt, nowIso, nowIso)
+		.bind(crypto.randomUUID(), params.userId, params.workspaceId, memo.id, scheduledAt, lead, scheduledAt, nowIso, nowIso, channelsJson)
 		.run();
 	return { ok: true, scheduledAt };
 }
@@ -169,6 +202,7 @@ async function setRepeatingReminder(
 	memo: { id: string; due_at: string | null; rule: Recurrence },
 	defaults: ReminderDefaults,
 	now: Date,
+	channelsJson: string | null,
 ): Promise<SetReminderResult> {
 	if (params.at !== undefined) {
 		return {
@@ -198,14 +232,14 @@ async function setRepeatingReminder(
 	const nowIso = now.toISOString();
 	await db
 		.prepare(
-			`INSERT INTO notifications (id, user_id, workspace_id, memo_id, channel, scheduled_at, lead_minutes, status, attempts, next_attempt_at, created_at, updated_at, occurrence_date, remind_time)
-			 VALUES (?, ?, ?, ?, 'discord', ?, ?, 'scheduled', 0, ?, ?, ?, ?, ?)
+			`INSERT INTO notifications (id, user_id, workspace_id, memo_id, channel, scheduled_at, lead_minutes, status, attempts, next_attempt_at, created_at, updated_at, occurrence_date, remind_time, channels)
+			 VALUES (?, ?, ?, ?, 'discord', ?, ?, 'scheduled', 0, ?, ?, ?, ?, ?, ?)
 			 ON CONFLICT(memo_id, channel) DO UPDATE SET
 			   scheduled_at = excluded.scheduled_at, lead_minutes = excluded.lead_minutes, status = 'scheduled',
 			   attempts = 0, next_attempt_at = excluded.next_attempt_at, last_error = NULL, sent_at = NULL, updated_at = excluded.updated_at,
-			   occurrence_date = excluded.occurrence_date, remind_time = excluded.remind_time`,
+			   occurrence_date = excluded.occurrence_date, remind_time = excluded.remind_time, channels = excluded.channels`,
 		)
-		.bind(crypto.randomUUID(), params.userId, params.workspaceId, memo.id, slot.scheduledAt, lead, slot.scheduledAt, nowIso, nowIso, slot.date, remindTime)
+		.bind(crypto.randomUUID(), params.userId, params.workspaceId, memo.id, slot.scheduledAt, lead, slot.scheduledAt, nowIso, nowIso, slot.date, remindTime, channelsJson)
 		.run();
 	return { ok: true, scheduledAt: slot.scheduledAt };
 }
@@ -291,6 +325,38 @@ export async function cancelReminder(db: D1Database, userId: string, memoId: str
 	return (res.meta.changes ?? 0) > 0;
 }
 
+type DeliveryResult = { ok: true; providerMessageId?: string | null } | { ok: false; retryable: boolean; code: string; retryAfterSeconds?: number };
+
+/** Send one reminder on one channel. Templates only; never an AI call. */
+async function deliver(
+	env: NotifyEnv,
+	channel: DeliveryChannel,
+	userId: string,
+	msg: { tone: ReminderTone; cardMemo: Parameters<typeof reminderCard>[1]; when: Parameters<typeof reminderCard>[2]; key: string },
+	at: Date,
+	fetchFn: typeof fetch,
+): Promise<DeliveryResult> {
+	const db = env.DB;
+	if (channel === 'discord') {
+		const recipient = await discordRecipient(db, userId);
+		if (!recipient) return { ok: false, retryable: false, code: 'channel_off' };
+		if (!env.DISCORD_BOT_TOKEN) return { ok: false, retryable: false, code: 'bot_not_configured' };
+		let result = await sendDiscordDm(env.DISCORD_BOT_TOKEN, recipient, reminderCard(msg.tone, msg.cardMemo, msg.when, env.PUBLIC_APP_URL), fetchFn);
+		// Card refused as invalid (400 / 50035): it was not delivered, so plain text is sent once instead — never both.
+		if (!result.ok && (result.code === '50035' || result.code === 'http_400')) {
+			result = await sendDiscordDm(env.DISCORD_BOT_TOKEN, recipient, reminderText(msg.tone, msg.cardMemo, msg.when), fetchFn);
+		}
+		return result;
+	}
+	const to = await emailRecipient(db, userId);
+	if (!to) return { ok: false, retryable: false, code: 'no_verified_email' };
+	const sender = emailSenderFromEnv(env, fetchFn);
+	if (!sender.configured) return sender.send({ to, subject: '', html: '', text: '' }); // a clear failure, never "sent"
+	if (!(await consumeEmailQuota(db, env, at))) return { ok: false, retryable: false, code: 'email_daily_limit' };
+	const content = reminderEmail(msg.tone, msg.cardMemo, msg.when, env.PUBLIC_APP_URL);
+	return sender.send({ to, ...content, idempotencyKey: msg.key });
+}
+
 export interface DispatchSummary {
 	sent: number;
 	retried: number;
@@ -366,7 +432,7 @@ export async function runDueReminders(
 
 		const row = await db
 			.prepare(
-				`SELECT n.user_id, n.memo_id, n.scheduled_at, n.lead_minutes, n.remind_time, n.occurrence_date, n.attempts,
+				`SELECT n.user_id, n.memo_id, n.scheduled_at, n.lead_minutes, n.remind_time, n.occurrence_date, n.attempts, n.channels,
 				        m.title, m.category, m.due_at, m.due_date, m.completed_at, m.deleted_at, m.recurrence,
 				        (m.workspace_id = n.workspace_id AND w.owner_user_id = n.user_id) AS owned, u.reminder_tone
 				 FROM notifications n
@@ -378,7 +444,7 @@ export async function runDueReminders(
 			.bind(id)
 			.first<{
 				user_id: string; memo_id: string; scheduled_at: string; lead_minutes: number | null; remind_time: string | null; occurrence_date: string | null;
-				attempts: number; reminder_tone: ReminderTone | null; recurrence: string | null;
+				attempts: number; reminder_tone: ReminderTone | null; recurrence: string | null; channels: string | null;
 				title: string; category: MemoCategory; due_at: string | null; due_date: string | null; completed_at: string | null; deleted_at: string | null; owned: number;
 			}>();
 		if (!row || !row.owned || row.deleted_at || row.completed_at) {
@@ -413,65 +479,109 @@ export async function runDueReminders(
 			summary.failed++;
 			continue;
 		}
-		const recipient = await discordRecipient(db, row.user_id);
-		if (!recipient || !(await discordReady(db, row.user_id))) {
+		// Every channel that is on (and chosen for this reminder) is handled on its own:
+		// one channel failing never stops or repeats another.
+		const ready = await readyChannels(db, row.user_id);
+		const wanted = parseChannels(row.channels);
+		const targets = wanted ? ready.filter((ch) => wanted.includes(ch)) : ready;
+		if (targets.length === 0) {
 			await finish(db, id, 'canceled', 'channel_off', at);
 			summary.canceled++;
 			continue;
 		}
-		if (!env.DISCORD_BOT_TOKEN) {
-			await finish(db, id, 'failed', 'bot_not_configured', at);
-			summary.failed++;
-			continue;
-		}
 
-		if (series) {
-			// One delivery per occurrence: the primary key refuses a second one, whatever happens elsewhere.
-			const first = await db
-				.prepare(
-					`INSERT INTO reminder_deliveries (memo_id, channel, occurrence_date, notification_id, created_at) VALUES (?, 'discord', ?, ?, ?)
-					 ON CONFLICT(memo_id, channel, occurrence_date) DO NOTHING`,
-				)
-				.bind(row.memo_id, row.occurrence_date, id, nowIso)
-				.run();
-			if (!first.meta.changes) {
-				await moveToNextOccurrence(db, id, series, how, row.occurrence_date!, at, 'sent', false);
-				summary.canceled++;
-				continue;
-			}
-		}
-
-		// The card is filled from stored fields and fixed templates only (no AI call).
+		// The message is filled from stored fields and fixed templates only (no AI call).
 		const tone = row.reminder_tone ?? 'friendly';
 		const when = { scheduledAt: row.scheduled_at, leadMinutes: how.lead };
 		const cardMemo = series
 			? { ...row, due_at: occurrenceAt(series, row.occurrence_date!), due_date: row.occurrence_date, repeat: describeRecurrence(series.rule) }
 			: row;
-		let result = await sendDiscordDm(env.DISCORD_BOT_TOKEN, recipient, reminderCard(tone, cardMemo, when, env.PUBLIC_APP_URL), fetchFn);
-		// Card refused as invalid (400 / 50035): it was not delivered, so plain text is sent once instead — never both.
-		if (!result.ok && (result.code === '50035' || result.code === 'http_400')) {
-			result = await sendDiscordDm(env.DISCORD_BOT_TOKEN, recipient, reminderText(tone, cardMemo, when), fetchFn);
-		}
-		if (result.ok) {
-			if (series) await moveToNextOccurrence(db, id, series, how, row.occurrence_date!, at, 'sent', true);
-			else await finish(db, id, 'sent', null, at);
-			summary.sent++;
-		} else if (result.retryable && row.attempts < MAX_ATTEMPTS) {
-			// Not delivered: free this occurrence for the retry.
-			if (series) {
-				await db
-					.prepare("DELETE FROM reminder_deliveries WHERE memo_id = ? AND channel = 'discord' AND occurrence_date = ?")
-					.bind(row.memo_id, row.occurrence_date)
-					.run();
+		// Delivery key: one occurrence of a series, or one scheduled time of a one-time reminder.
+		const occurrenceKey = series ? row.occurrence_date! : `once@${row.scheduled_at}`;
+		let retry = false;
+		let sentNow = false;
+		let retryAfterSeconds = 0;
+		const errors: string[] = [];
+		for (const channel of targets) {
+			// The primary key (memo, channel, occurrence) refuses a second delivery, whatever happens elsewhere.
+			const first = await db
+				.prepare(
+					`INSERT INTO reminder_deliveries (memo_id, channel, occurrence_date, notification_id, created_at) VALUES (?, ?, ?, ?, ?)
+					 ON CONFLICT(memo_id, channel, occurrence_date) DO NOTHING`,
+				)
+				.bind(row.memo_id, channel, occurrenceKey, id, nowIso)
+				.run();
+			if (!first.meta.changes) continue; // already handled for this occurrence (sent, or failed for good)
+			let result: { ok: true; providerMessageId?: string | null } | { ok: false; retryable: boolean; code: string; retryAfterSeconds?: number };
+			try {
+				result = await deliver(env, channel, row.user_id, { tone, cardMemo, when, key: `${id}:${occurrenceKey}:${channel}` }, at, fetchFn);
+			} catch (error) {
+				result = { ok: false, retryable: true, code: `${channel}_exception` };
+				console.error('reminder delivery threw', channel, String(error).slice(0, 120));
 			}
-			const waitMs = Math.max((result.retryAfterSeconds ?? 0) * 1000, 2 ** row.attempts * 60_000);
+			const willRetry = !result.ok && result.retryable && row.attempts < MAX_ATTEMPTS;
+			await recordAttempt(
+				db,
+				{
+					notificationId: id,
+					userId: row.user_id,
+					memoId: row.memo_id,
+					channel,
+					occurrenceKey,
+					outcome: result.ok ? 'accepted' : willRetry ? 'retry' : 'failed',
+					errorCode: result.ok ? null : result.code,
+					providerMessageId: result.ok ? (result.providerMessageId ?? null) : null,
+				},
+				at,
+			);
+			if (result.ok) {
+				sentNow = true;
+				continue;
+			}
+			errors.push(channel === 'discord' ? result.code : `email:${result.code}`);
+			if (willRetry) {
+				// Not delivered: free this channel's slot for the retry (the other channels keep theirs).
+				await db
+					.prepare('DELETE FROM reminder_deliveries WHERE memo_id = ? AND channel = ? AND occurrence_date = ?')
+					.bind(row.memo_id, channel, occurrenceKey)
+					.run();
+				retry = true;
+				retryAfterSeconds = Math.max(retryAfterSeconds, result.retryAfterSeconds ?? 0);
+			}
+		}
+
+		if (retry) {
+			const waitMs = Math.max(retryAfterSeconds * 1000, 2 ** row.attempts * 60_000);
 			await db
 				.prepare("UPDATE notifications SET status = 'scheduled', next_attempt_at = ?, last_error = ?, updated_at = ? WHERE id = ?")
-				.bind(new Date(at.getTime() + waitMs).toISOString(), result.code, nowIso, id)
+				.bind(new Date(at.getTime() + waitMs).toISOString(), errors.join(','), nowIso, id)
 				.run();
 			summary.retried++;
+			continue;
+		}
+		// Sent = at least one channel's provider accepted this occurrence (now or in an earlier try).
+		const tried = await db
+			.prepare(
+				`SELECT MAX(outcome = 'accepted') AS accepted, MAX(outcome = 'failed') AS failed
+				 FROM notification_attempts WHERE notification_id = ? AND occurrence_key = ?`,
+			)
+			.bind(id, occurrenceKey)
+			.first<{ accepted: number | null; failed: number | null }>();
+		const accepted = tried?.accepted === 1;
+		// Every slot was already taken and nothing was tried here (an overlapping run or an older
+		// delivery handled it): treat like before — move on without sending again.
+		const legacyDone = !accepted && errors.length === 0 && tried?.failed !== 1;
+		if (accepted || legacyDone) {
+			if (series) await moveToNextOccurrence(db, id, series, how, row.occurrence_date!, at, 'sent', sentNow);
+			else {
+				await finish(db, id, 'sent', null, at);
+				if (errors.length) await db.prepare('UPDATE notifications SET last_error = ? WHERE id = ?').bind(errors.join(','), id).run();
+			}
+			if (sentNow) summary.sent++;
+			else summary.canceled++;
 		} else {
-			await finish(db, id, 'failed', result.code, at);
+			// Refused for good on every channel (e.g. DMs blocked): stop, as before — retrying would fail again.
+			await finish(db, id, 'failed', errors.join(','), at);
 			summary.failed++;
 		}
 	}
@@ -513,7 +623,7 @@ export async function autoScheduleRecommended(
 	params: { userId: string; workspaceId: string },
 	now: Date,
 ): Promise<number> {
-	if (!(await discordReady(db, params.userId))) return 0;
+	if ((await readyChannels(db, params.userId)).length === 0) return 0;
 	const defaults = await getReminderDefaults(db, params.userId);
 	const { results } = await db
 		.prepare(

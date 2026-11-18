@@ -30,7 +30,7 @@ export interface DiscordMessage {
 	components?: unknown[];
 }
 
-const CATEGORY: Record<MemoCategory, { label: string; icon: string; color: number }> = {
+export const CATEGORY: Record<MemoCategory, { label: string; icon: string; color: number }> = {
 	todo: { label: '할 일', icon: '✅', color: 0x2e7d32 },
 	schedule: { label: '일정', icon: '📅', color: 0x3858e9 },
 	idea: { label: '아이디어', icon: '💡', color: 0x8e44ad },
@@ -154,11 +154,14 @@ const TEMPLATES: Record<ReminderTone, Record<Kind, { before: (t: string, d: stri
 	},
 };
 
-/** The one-line tone message (also used as the plain-text fallback body). */
-export function toneMessage(tone: ReminderTone, memo: CardMemo, timing: CardTiming): string {
+/**
+ * The one-line tone message (also used as the plain-text fallback body).
+ * `escape`: Discord markdown escaping (default) or plain one-line text (e-mail; HTML-escaped later).
+ */
+export function toneMessage(tone: ReminderTone, memo: CardMemo, timing: CardTiming, escape: 'discord' | 'plain' = 'discord'): string {
 	const t = TEMPLATES[tone] ?? TEMPLATES.friendly;
 	const set = t[kindOf(memo.category)];
-	const title = safeText(memo.title, 60);
+	const title = escape === 'discord' ? safeText(memo.title, 60) : flatText(memo.title, 60);
 	const lead = effectiveLead(memo, timing);
 	if (lead === null) return set.plain(title);
 	if (lead === 0) return set.now(title);
